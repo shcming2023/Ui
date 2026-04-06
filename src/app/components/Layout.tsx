@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react';
+import { useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -15,6 +16,7 @@ import {
   Files,
   Clock,
 } from 'lucide-react';
+import { setBackupToken } from '../../utils/backupApi';
 
 interface NavItem {
   label: string;
@@ -59,6 +61,19 @@ interface LayoutProps {
 export function Layout({ children }: LayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
+
+  // SPA 内部跳转时同步 Token（支持 ?token=xxx 参数）
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const token = params.get('token');
+    if (token) {
+      setBackupToken(token);
+      // 清除 URL 中的 token 参数
+      const newSearch = new URLSearchParams(location.search);
+      newSearch.delete('token');
+      navigate({ search: newSearch.toString() }, { replace: true });
+    }
+  }, [location.search, navigate]);
 
   const isActive = (path: string) => {
     if (path === '/') return location.pathname === '/';

@@ -1,9 +1,23 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+import { Client } from 'minio';
 
 const app = express();
 const port = Number(process.env.UPLOAD_PORT || 8788);
+
+// 存储后端配置
+const STORAGE_BACKEND = process.env.STORAGE_BACKEND || 'tmpfiles';
+
+// MinIO 配置
+const minioClient = new Client({
+  endPoint: process.env.MINIO_ENDPOINT || 'minio',
+  port: Number(process.env.MINIO_PORT || 9000),
+  useSSL: process.env.MINIO_USE_SSL === 'true',
+  accessKey: process.env.MINIO_ACCESS_KEY || 'minioadmin',
+  secretKey: process.env.MINIO_SECRET_KEY || 'minioadmin',
+});
+const MINIO_BUCKET = process.env.MINIO_BUCKET || 'eduassets';
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -74,6 +88,41 @@ async function uploadToTmpfiles(buffer, mimeType, fileName, retries = 3) {
   throw lastError || new Error('上传失败');
 }
 
+async function uploadToMinIO(buffer, mimeType, fileName, retries = 3) {
+  let lastError = null;
+
+  for (let i = 1; i <= retries; i += 1) {
+    try {
+      // 确保 bucket 存在
+      const bucketExists = await minioClient.bucketExists(MINIO_BUCKET);
+      if (!bucketExists) {
+        await minioClient.makeBucket(MINIO_BUCKET, 'us-east-1');
+      }
+
+      const objectName = `${Date.now()}-${fileName}`;
+      await minioClient.putObject(
+        MINIO_BUCKET,
+        objectName,
+        buffer,
+        buffer.length,
+        { 'Content-Type': mimeType || 'application/octet-stream' }
+      );
+
+      // 构建公共访问 URL（假设 MinIO 通过 Nginx 暴露为 /minio）
+      // 如需签名 URL，请使用 minioClient.presignedGetObject
+      const publicUrl = `/minio/${MINIO_BUCKET}/${objectName}`;
+      return { provider: 'minio', url: publicUrl };
+    } catch (error) {
+      lastError = error;
+      if (i < retries) {
+        await new Promise((resolve) => setTimeout(resolve, 700 * i));
+      }
+    }
+  }
+
+  throw lastError || new Error('MinIO 上传失败');
+}
+
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -82,7 +131,20 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     }
 
     const safeFileName = normalizeFileName(req.file.originalname);
-    const uploaded = await uploadToTmpfiles(req.file.buffer, req.file.mimetype, safeFileName, 3);
+    let uploaded;
+
+    // 根据 STORAGE_BACKEND 选择存储后端
+    if (STORAGE_BACKEND === 'minio') {
+      try {
+        uploaded = await uploadToMinIO(req.file.buffer, req.file.mimetype, safeFileName, 3);
+      } catch (minioError) {
+        console.error('[upload-server] MinIO upload failed, fallback to tmpfiles:', minioError);
+        // MinIO 失败时降级到 tmpfiles
+        uploaded = await uploadToTmpfiles(req.file.buffer, req.file.mimetype, safeFileName, 3);
+      }
+    } else {
+      uploaded = await uploadToTmpfiles(req.file.buffer, req.file.mimetype, safeFileName, 3);
+    }
 
     res.json({
       url: uploaded.url,

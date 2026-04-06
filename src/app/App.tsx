@@ -25,20 +25,21 @@ export default function App() {
           <Layout>
             <ErrorBoundary>
               <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/source-materials" element={<SourceMaterialsPage />} />
-                <Route path="/asset/:id" element={<AssetDetailPage />} />
-                <Route path="/process-workbench" element={<ProcessWorkbenchPage />} />
-                <Route path="/products" element={<ProductsPage />} />
-                <Route path="/metadata" element={<MetadataManagementPage />} />
-                <Route path="/tasks" element={<TaskCenterPage />} />
-                <Route path="/settings" element={<SettingsPage />} />
-                {/* Overleaf 备份系统路由 */}
-                <Route path="/backup" element={<ProjectBackupPage />} />
-                <Route path="/backup/database" element={<DatabaseBackupPage />} />
-                <Route path="/backup/latex" element={<LatexToolPage />} />
-                <Route path="/backup/files" element={<FilesBrowserPage />} />
-                <Route path="/backup/scheduler" element={<SchedulerPage />} />
+                {/* ========== EduAsset CMS 路由 ========== */}
+                <Route path="/" element={<Dashboard />} /> {/* 完成 */}
+                <Route path="/source-materials" element={<SourceMaterialsPage />} /> {/* 完成 */}
+                <Route path="/asset/:id" element={<AssetDetailPage />} /> {/* 完成 */}
+                <Route path="/process-workbench" element={<ProcessWorkbenchPage />} /> {/* 完成 */}
+                <Route path="/products" element={<ProductsPage />} /> {/* Mock 数据，未接入真实 API */}
+                <Route path="/metadata" element={<MetadataManagementPage />} /> {/* Mock 数据，未接入真实 API */}
+                <Route path="/tasks" element={<TaskCenterPage />} /> {/* Mock 数据，未接入真实 API */}
+                <Route path="/settings" element={<SettingsPage />} /> {/* 完成 */}
+                {/* ========== Overleaf 备份系统路由 ========== */}
+                <Route path="/backup" element={<ProjectBackupPage />} /> {/* 已接入后端 */}
+                <Route path="/backup/database" element={<DatabaseBackupPage />} /> {/* Mock 数据，未接入真实 API */}
+                <Route path="/backup/latex" element={<LatexToolPage />} /> {/* Mock 数据，未接入真实 API */}
+                <Route path="/backup/files" element={<FilesBrowserPage />} /> {/* Mock 数据，未接入真实 API */}
+                <Route path="/backup/scheduler" element={<SchedulerPage />} /> {/* Mock 数据，未接入真实 API */}
               </Routes>
             </ErrorBoundary>
           </Layout>
