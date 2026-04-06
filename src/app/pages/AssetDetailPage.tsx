@@ -257,12 +257,15 @@ export function AssetDetailPage() {
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <h2 className="font-semibold text-gray-800 mb-4">元数据</h2>
             <dl className="space-y-2">
-              {Object.entries(detail.metadata).filter(([, v]) => v !== '').map(([k, v]) => (
+              {Object.entries(detail.metadata).filter(([, v]) => v != null && v !== '').map(([k, v]) => (
                 <div key={k} className="flex justify-between text-sm">
                   <dt className="text-gray-500 capitalize">{k}</dt>
                   <dd className="text-gray-800 font-medium text-right max-w-32 truncate">{String(v)}</dd>
                 </div>
               ))}
+              {Object.entries(detail.metadata).filter(([, v]) => v == null || v === '').length === Object.entries(detail.metadata).length && (
+                <div className="text-center py-2 text-gray-400 text-sm">暂无元数据</div>
+              )}
             </dl>
           </div>
 
