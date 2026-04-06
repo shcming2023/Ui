@@ -21,7 +21,7 @@ export default function App() {
   return (
     <ErrorBoundary>
       <AppProvider>
-        <BrowserRouter>
+        <BrowserRouter basename="/cms">
           <Layout>
             <ErrorBoundary>
               <Routes>

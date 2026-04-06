@@ -85,14 +85,21 @@ services:
 
   # ── MinIO 对象存储服务 ───────────────────────────────────
   # 提供持久化文件存储，替代 tmpfiles.org 临时存储
-  # 控制台访问：http://localhost:9001 (用户名/密码默认为 minioadmin)
+  # ⚠️ 生产环境安全建议：将 ports 注释掉，仅通过内部网络访问
+  # 如需外部访问控制台，使用 Nginx 反向代理而非直接暴露端口
+  # 控制台访问（开发环境）：http://localhost:9001
   minio:
     image: minio/minio:latest
     container_name: cms-minio
     restart: unless-stopped
+    # 生产环境：注释掉以下 ports 配置，仅通过内部网络访问
+    # ports:
+    #   - "9000:9000"  # API 端口
+    #   - "9001:9001"  # Web 控制台端口
+    # 开发环境：如需本地调试，可取消注释端口映射
     ports:
-      - "9000:9000"  # API 端口
-      - "9001:9001"  # Web 控制台端口
+      - "9000:9000"  # API 端口（仅开发环境）
+      - "9001:9001"  # Web 控制台端口（仅开发环境）
     networks:
       - cms-network
     environment:
