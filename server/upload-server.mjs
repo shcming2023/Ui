@@ -254,8 +254,6 @@ app.post('/parse/download', async (req, res) => {
   }
 
   try {
-    await ensureBucket();
-
     console.log(`[upload-server] Downloading MinerU ZIP for material ${materialId}: ${zipUrl}`);
 
     // 1. 下载 ZIP
@@ -277,6 +275,16 @@ app.post('/parse/download', async (req, res) => {
     const uploadedFiles = [];
     let markdownObjectName = null;
     let markdownUrl = null;
+    let markdownContent = null; // 始终内联返回 full.md 文本，作为存储不可用时的兜底
+
+    // 先尝试 MinIO；若 MinIO 不可用则跳过（仍会内联返回 markdownContent）
+    let minioAvailable = true;
+    try {
+      await ensureBucket();
+    } catch (bucketErr) {
+      minioAvailable = false;
+      console.warn('[upload-server] MinIO unavailable, will inline markdownContent as fallback:', bucketErr.message);
+    }
 
     for (const [name, zipEntry] of Object.entries(zip.files)) {
       if (zipEntry.dir) continue;
@@ -293,36 +301,47 @@ app.post('/parse/download', async (req, res) => {
         : lower.endsWith('.svg') ? 'image/svg+xml'
         : 'image/jpeg';
 
-      const objectName = `${prefix}/${name}`;
-
-      await minioClient.putObject(
-        MINIO_BUCKET,
-        objectName,
-        content,
-        content.length,
-        { 'Content-Type': mimeType },
-      );
-
-      const presignedUrl = await minioClient.presignedGetObject(
-        MINIO_BUCKET,
-        objectName,
-        PRESIGNED_EXPIRY,
-      );
-
-      uploadedFiles.push({ objectName, presignedUrl, name });
-
-      if (isMd && (name === 'full.md' || name.endsWith('/full.md'))) {
-        markdownObjectName = objectName;
-        markdownUrl = presignedUrl;
+      // 捕获 full.md 文本内容（无论存储是否成功都会返回）
+      if (isMd && (name === 'full.md' || name.endsWith('/full.md')) && markdownContent === null) {
+        markdownContent = content.toString('utf-8');
+        console.log(`[upload-server] Captured full.md inline (${markdownContent.length} chars)`);
       }
 
-      console.log(`[upload-server] Stored: ${objectName}`);
+      if (minioAvailable) {
+        try {
+          const objectName = `${prefix}/${name}`;
+          await minioClient.putObject(MINIO_BUCKET, objectName, content, content.length, { 'Content-Type': mimeType });
+          const presignedUrl = await minioClient.presignedGetObject(MINIO_BUCKET, objectName, PRESIGNED_EXPIRY);
+          uploadedFiles.push({ objectName, presignedUrl, name });
+          if (isMd && (name === 'full.md' || name.endsWith('/full.md'))) {
+            markdownObjectName = objectName;
+            markdownUrl = presignedUrl;
+          }
+          console.log(`[upload-server] Stored to MinIO: ${objectName}`);
+        } catch (minioErr) {
+          console.warn(`[upload-server] MinIO put failed for ${name}:`, minioErr.message);
+          minioAvailable = false;
+        }
+      }
+
+      // MinIO fallback：仅将 full.md 上传到 tmpfiles（用 .txt 后缀，tmpfiles 不接受 .md）
+      if (!minioAvailable && isMd && (name === 'full.md' || name.endsWith('/full.md')) && !markdownUrl) {
+        try {
+          const tmpResult = await uploadToTmpfiles(content, 'text/plain', 'full.txt');
+          markdownUrl = tmpResult.url;
+          uploadedFiles.push({ objectName: null, presignedUrl: markdownUrl, name });
+          console.log(`[upload-server] full.md fallback to tmpfiles: ${markdownUrl}`);
+        } catch (tmpErr) {
+          console.warn('[upload-server] tmpfiles fallback for full.md failed (will use inline content):', tmpErr.message);
+        }
+      }
     }
 
     res.json({
       files: uploadedFiles,
       markdownObjectName,
       markdownUrl,
+      markdownContent, // 内联 full.md 文本，MinIO/tmpfiles 不可用时前端直接使用
       totalFiles: uploadedFiles.length,
     });
   } catch (error) {
@@ -341,6 +360,7 @@ app.post('/parse/analyze', async (req, res) => {
   const {
     markdownObjectName,
     markdownUrl,
+    markdownContent,  // 直接内联传递的 full.md 文本（优先级最高）
     materialId,
     aiApiEndpoint,
     aiApiKey,
@@ -348,11 +368,16 @@ app.post('/parse/analyze', async (req, res) => {
     prompts,
   } = req.body;
 
+  // trim 防止前后空格导致鉴权失败
+  const trimmedKey = (aiApiKey || '').trim();
+  const trimmedEndpoint = (aiApiEndpoint || '').trim();
+  const trimmedModel = (aiModel || '').trim();
+
   if (!materialId) {
     res.status(400).json({ error: '缺少 materialId' });
     return;
   }
-  if (!aiApiEndpoint || !aiApiKey || !aiModel) {
+  if (!trimmedEndpoint || !trimmedKey || !trimmedModel) {
     res.status(400).json({ error: '缺少 AI API 配置（aiApiEndpoint / aiApiKey / aiModel）' });
     return;
   }
@@ -361,7 +386,13 @@ app.post('/parse/analyze', async (req, res) => {
     // ── 1. 读取 Markdown 内容 ──────────────────────────────────
     let markdownText = '';
 
-    if (markdownObjectName) {
+    // 优先：直接使用内联传递的文本（无需网络请求）
+    if (markdownContent && typeof markdownContent === 'string' && markdownContent.trim()) {
+      markdownText = markdownContent;
+      console.log(`[upload-server] Using inline markdownContent (${markdownText.length} chars)`);
+    }
+
+    if (!markdownText && markdownObjectName) {
       // 从 MinIO 读取
       try {
         const stream = await minioClient.getObject(MINIO_BUCKET, markdownObjectName);
@@ -407,7 +438,7 @@ app.post('/parse/analyze', async (req, res) => {
     const p = { ...defaultPrompts, ...(prompts || {}) };
 
     const systemPrompt = `你是一个专业的教育资源元数据提取助手。请根据提供的文档内容，提取结构化的元数据信息。
-严格按照 JSON 格式返回，不要输出任何其他内容。`;
+严格按照 JSON 格式返回，不要输出任何其他内容，不要包含 markdown 代码块标记。`;
 
     const userPrompt = `请分析以下教育资料内容，并按照指定格式返回结构化元数据：
 
@@ -432,26 +463,31 @@ ${mdSnippet}
 3. 仅返回 JSON，不要有任何前缀或解释文字`;
 
     // ── 3. 调用大模型 API ──────────────────────────────────────
-    console.log(`[upload-server] Calling AI API: ${aiApiEndpoint} model=${aiModel}`);
+    console.log(`[upload-server] Calling AI API: ${trimmedEndpoint} model=${trimmedModel} key=${trimmedKey ? trimmedKey.slice(0,8)+'...(len='+trimmedKey.length+')' : 'EMPTY'}`);
 
     const aiController = new AbortController();
-    const aiTimer = setTimeout(() => aiController.abort(), 60_000);
+    const aiTimer = setTimeout(() => aiController.abort(), 120_000);
 
-    const aiResp = await fetch(`${aiApiEndpoint}/chat/completions`, {
+    // trimmedEndpoint 由前端传入，可能是完整 URL（含 /chat/completions）或 base URL
+    // 兼容两种情况：若末尾已含 /chat/completions 则直接用，否则追加
+    const aiFullUrl = /\/chat\/completions\/?$/.test(trimmedEndpoint)
+      ? trimmedEndpoint
+      : `${trimmedEndpoint.replace(/\/$/, '')}/chat/completions`;
+    console.log(`[upload-server] AI full URL: ${aiFullUrl}`);
+    const aiResp = await fetch(aiFullUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${aiApiKey}`,
+        Authorization: `Bearer ${trimmedKey}`,
       },
       body: JSON.stringify({
-        model: aiModel,
+        model: trimmedModel,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.1,
         max_tokens: 1024,
-        response_format: { type: 'json_object' },
       }),
       signal: aiController.signal,
     });

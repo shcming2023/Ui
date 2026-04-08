@@ -1,25 +1,11 @@
 import { useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Tag, Shield, Clock, GitBranch, FileText, ChevronDown, ChevronUp, Play, Cpu, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { ArrowLeft, Tag, FileText, Play, Cpu, CheckCircle, XCircle, Loader } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import { StatusBadge } from '../components/StatusBadge';
-import type { PermissionLevel, ProcessTask } from '../../store/types';
+import type { ProcessTask } from '../../store/types';
 import { runMinerUPipeline } from '../../utils/mineruApi';
-
-const PERMISSION_OPTIONS: { value: PermissionLevel; label: string; color: string }[] = [
-  { value: 'internal',   label: '内部',   color: 'bg-gray-100 text-gray-600' },
-  { value: 'review',     label: '审核中', color: 'bg-yellow-100 text-yellow-700' },
-  { value: 'production', label: '生产',   color: 'bg-blue-100 text-blue-700' },
-  { value: 'public',     label: '公开',   color: 'bg-green-100 text-green-700' },
-];
-
-const STAGE_COLOR_MAP: Record<string, string> = {
-  blue:   'bg-blue-500',
-  orange: 'bg-orange-500',
-  green:  'bg-green-500',
-  purple: 'bg-purple-500',
-};
 
 export function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -30,7 +16,6 @@ export function AssetDetailPage() {
   const detail = state.assetDetails[numId];
   const material = state.materials.find((m) => m.id === numId);
 
-  const [expandHistory, setExpandHistory] = useState(false);
   const [tagInput, setTagInput] = useState('');
   const [editingTags, setEditingTags] = useState(false);
   const [localTags, setLocalTags] = useState<string[]>(detail?.tags ?? []);
@@ -40,6 +25,7 @@ export function AssetDetailPage() {
   const [mineruProgress, setMineruProgress] = useState(0);
   const [mineruProgressMsg, setMineruProgressMsg] = useState('');
   const [mineruMarkdown, setMineruMarkdown] = useState<string>('');
+  const [mineruRetryCount, setMineruRetryCount] = useState(0);
 
   // AI 分析状态
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
@@ -58,11 +44,6 @@ export function AssetDetailPage() {
       </div>
     );
   }
-
-  const handlePermissionChange = (p: PermissionLevel) => {
-    dispatch({ type: 'UPDATE_ASSET_PERMISSION', payload: { id: numId, permission: p } });
-    toast.success('权限已更新');
-  };
 
   const handleStartProcessing = () => {
     if (!detail) return;
@@ -99,29 +80,6 @@ export function AssetDetailPage() {
       payload: { id: numId, aiStatus: 'analyzing', status: 'processing' },
     });
 
-    // 更新 assetDetails 中的状态
-    const updatedDetail = {
-      ...detail,
-      status: 'processing',
-      history: [
-        ...detail.history,
-        {
-          id: detail.history.length + 1,
-          action: '开始处理',
-          time: '刚刚',
-          operator: '系统',
-          type: 'system',
-          status: 'processing',
-        },
-      ],
-    };
-
-    // 需要手动更新 assetDetails，因为 UPDATE_MATERIAL_AI_STATUS 没有完整更新 lineage
-    dispatch({
-      type: 'UPDATE_ASSET_PERMISSION',
-      payload: { id: numId, permission: detail.permission },
-    });
-
     toast.success('处理任务已创建，正在处理中');
   };
 
@@ -144,6 +102,7 @@ export function AssetDetailPage() {
     setMineruRunning(true);
     setMineruProgress(0);
     setMineruMarkdown('');
+    setMineruRetryCount(0);
     dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'processing' } });
 
     try {
@@ -165,18 +124,27 @@ export function AssetDetailPage() {
         throw new Error('无法获取文件访问地址');
       }
 
+      // 用 onProgress 回调同步更新进度和重试计数
+      const handleProgress = (pct: number, msg: string) => {
+        setMineruProgress(pct);
+        setMineruProgressMsg(msg);
+        // 从消息中提取重试次数（格式：第 N/3 次）
+        const retryMatch = msg.match(/第\s*(\d+)\s*\/\s*\d+\s*次/);
+        if (retryMatch) setMineruRetryCount(Number(retryMatch[1]) - 1);
+      };
+
       const result = await runMinerUPipeline(
         resolvedUrl,
         `${material.title}.${material.type.toLowerCase()}`,
         state.mineruConfig,
-        (pct, msg) => { setMineruProgress(pct); setMineruProgressMsg(msg); },
+        handleProgress,
       );
 
       if (result.zipUrl) {
         dispatch({ type: 'UPDATE_MATERIAL_MINERU_ZIP_URL', payload: { id: numId, mineruZipUrl: result.zipUrl } });
 
-        // 解析完成后，让后端下载 ZIP 并将解析物存入 MinIO
-        if (objectName) {
+        // 解析完成后，让后端下载 ZIP 并将解析物存入存储（MinIO 或 tmpfiles fallback）
+        {
           setMineruProgressMsg('保存解析结果到文件库...');
           try {
             const downloadRes = await fetch('/__proxy/upload/parse/download', {
@@ -187,8 +155,14 @@ export function AssetDetailPage() {
 
             if (downloadRes.ok) {
               const downloadData = await downloadRes.json();
-              // 保存 full.md 的 objectName 和 URL 到 metadata
-              if (downloadData.markdownObjectName) {
+
+              // 内联 markdownContent 始终存在（服务端从 ZIP 提取），优先用于预览
+              if (downloadData.markdownContent) {
+                setMineruMarkdown(downloadData.markdownContent);
+              }
+
+              // markdownObjectName（MinIO）或 markdownUrl（tmpfiles fallback）任一存在即可
+              if (downloadData.markdownObjectName || downloadData.markdownUrl) {
                 dispatch({
                   type: 'UPDATE_MATERIAL',
                   payload: {
@@ -196,16 +170,16 @@ export function AssetDetailPage() {
                     updates: {
                       metadata: {
                         ...material.metadata,
-                        markdownObjectName: downloadData.markdownObjectName,
-                        markdownUrl: downloadData.markdownUrl,
-                        parsedFilesCount: String(downloadData.totalFiles),
+                        ...(downloadData.markdownObjectName ? { markdownObjectName: downloadData.markdownObjectName } : {}),
+                        ...(downloadData.markdownUrl ? { markdownUrl: downloadData.markdownUrl } : {}),
+                        parsedFilesCount: String(downloadData.totalFiles ?? '?'),
                       },
                     },
                   },
                 });
 
-                // 读取 full.md 内容用于预览
-                if (downloadData.markdownUrl) {
+                // 若没有内联内容，再从 URL 拉取
+                if (!downloadData.markdownContent && downloadData.markdownUrl) {
                   const mdRes = await fetch(downloadData.markdownUrl);
                   if (mdRes.ok) {
                     const mdText = await mdRes.text();
@@ -213,9 +187,9 @@ export function AssetDetailPage() {
                   }
                 }
               }
-              console.log(`[MinerU] 解析物已存入 MinIO: ${downloadData.totalFiles} 个文件`);
+              console.log(`[MinerU] 解析物已保存: ${downloadData.totalFiles ?? 0} 个文件，markdownContent: ${downloadData.markdownContent?.length ?? 0} chars`);
             } else {
-              console.warn('[MinerU] 解析物回存 MinIO 失败，ZIP URL 仍可下载');
+              console.warn('[MinerU] 解析物保存失败，ZIP URL 仍可下载');
             }
           } catch (downloadErr) {
             console.warn('[MinerU] 解析物回存 MinIO 失败:', downloadErr);
@@ -242,21 +216,68 @@ export function AssetDetailPage() {
   const handleAiAnalyze = async () => {
     if (!material) { toast.error('找不到资料信息'); return; }
 
-    const markdownObjectName = material.metadata?.markdownObjectName as string | undefined;
-    const markdownUrl = material.metadata?.markdownUrl as string | undefined;
+    let markdownObjectName = material.metadata?.markdownObjectName as string | undefined;
+    let markdownUrl = material.metadata?.markdownUrl as string | undefined;
+    // mineruMarkdown 是本次会话从 parse/download 响应中内联获取的 full.md 文本
+    const inlineMarkdownContent = mineruMarkdown || undefined;
 
-    if (!markdownObjectName && !markdownUrl) {
+    // 如果还没有 markdown，但有 MinerU zipUrl，先尝试 download
+    if (!markdownObjectName && !markdownUrl && !inlineMarkdownContent && material.mineruZipUrl) {
+      setAiAnalyzing(true);
+      try {
+        const downloadRes = await fetch('/__proxy/upload/parse/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ zipUrl: material.mineruZipUrl, materialId: numId }),
+        });
+        if (downloadRes.ok) {
+          const downloadData = await downloadRes.json();
+          if (downloadData.markdownObjectName) markdownObjectName = downloadData.markdownObjectName;
+          if (downloadData.markdownUrl) markdownUrl = downloadData.markdownUrl;
+          if (downloadData.markdownContent) {
+            setMineruMarkdown(downloadData.markdownContent);
+          }
+          if (downloadData.markdownObjectName || downloadData.markdownUrl) {
+            dispatch({
+              type: 'UPDATE_MATERIAL',
+              payload: {
+                id: numId,
+                updates: {
+                  metadata: {
+                    ...material.metadata,
+                    ...(downloadData.markdownObjectName ? { markdownObjectName: downloadData.markdownObjectName } : {}),
+                    ...(downloadData.markdownUrl ? { markdownUrl: downloadData.markdownUrl } : {}),
+                    parsedFilesCount: String(downloadData.totalFiles ?? '?'),
+                  },
+                },
+              },
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('[AI] download before analyze failed:', e);
+      }
+    }
+
+    // 最终兜底：用内联内容（组件内存，页面刷新后失效）
+    const finalInlineContent = markdownObjectName || markdownUrl
+      ? undefined
+      : (inlineMarkdownContent || mineruMarkdown || undefined);
+
+    if (!markdownObjectName && !markdownUrl && !finalInlineContent) {
       toast.error('请先完成 MinerU 解析，生成 full.md 后再运行 AI 分析');
+      setAiAnalyzing(false);
       return;
     }
 
     const { apiEndpoint, apiKey, model } = state.aiConfig;
+    console.log('[AI] config check — endpoint:', apiEndpoint, '| key:', apiKey ? apiKey.slice(0,8)+'...(len='+apiKey.length+')' : 'EMPTY', '| model:', model);
     if (!apiEndpoint?.trim() || !apiKey?.trim() || !model?.trim()) {
       toast.error('请先在「系统设置」中配置 AI API（接口地址 / Key / 模型名）');
       return;
     }
 
-    setAiAnalyzing(true);
+    if (!aiAnalyzing) setAiAnalyzing(true);
     dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: numId, aiStatus: 'analyzing' } });
 
     try {
@@ -266,6 +287,7 @@ export function AssetDetailPage() {
         body: JSON.stringify({
           markdownObjectName,
           markdownUrl,
+          ...(finalInlineContent ? { markdownContent: finalInlineContent } : {}),
           materialId: numId,
           aiApiEndpoint: apiEndpoint.replace(/\/$/, ''),
           aiApiKey: apiKey,
@@ -330,8 +352,6 @@ export function AssetDetailPage() {
   };
 
   const removeTag = (tag: string) => setLocalTags((prev) => prev.filter((t) => t !== tag));
-
-  const displayedHistory = expandHistory ? detail.history : detail.history.slice(0, 3);
 
   return (
     <div className="p-6 space-y-5">
@@ -407,12 +427,19 @@ export function AssetDetailPage() {
             {mineruRunning && (
               <div className="mb-4">
                 <div className="flex justify-between text-xs text-gray-500 mb-1">
-                  <span>{mineruProgressMsg}</span>
+                  <span className="flex items-center gap-1.5">
+                    {mineruProgressMsg}
+                    {mineruRetryCount > 0 && (
+                      <span className="px-1.5 py-0.5 bg-yellow-100 text-yellow-700 rounded text-xs font-medium">
+                        重试 {mineruRetryCount}/3
+                      </span>
+                    )}
+                  </span>
                   <span>{mineruProgress}%</span>
                 </div>
                 <div className="w-full bg-gray-100 rounded-full h-2">
                   <div
-                    className="bg-orange-500 h-2 rounded-full transition-all duration-500"
+                    className={`h-2 rounded-full transition-all duration-500 ${mineruRetryCount > 0 ? 'bg-yellow-500' : 'bg-orange-500'}`}
                     style={{ width: `${mineruProgress}%` }}
                   />
                 </div>
@@ -492,8 +519,8 @@ export function AssetDetailPage() {
                 )}
                 <button
                   onClick={handleAiAnalyze}
-                  disabled={aiAnalyzing || !material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl}
-                  title={(!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl) ? '请先完成 MinerU 解析' : ''}
+                  disabled={aiAnalyzing || (!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && !material?.mineruZipUrl)}
+                  title={(!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && !material?.mineruZipUrl) ? '请先完成 MinerU 解析' : ''}
                   className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                 >
                   {aiAnalyzing
@@ -527,92 +554,11 @@ export function AssetDetailPage() {
                 )}
               </dl>
             )}
-            {!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && (
+            {!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && !material?.mineruZipUrl && (
               <p className="text-xs text-yellow-600">⚠ 请先完成 MinerU 解析，AI 分析将基于解析出的 Markdown 内容</p>
             )}
           </div>
 
-          {/* 处理溯源 */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
-              <GitBranch size={16} className="text-blue-500" /> 处理溯源
-            </h2>
-            <div className="flex items-stretch gap-0">
-              {detail.lineage.map((node, i) => (
-                <div key={i} className="flex-1 flex flex-col items-center">
-                  <div className={`w-3 h-3 rounded-full ${STAGE_COLOR_MAP[node.color] ?? 'bg-gray-400'} flex-shrink-0`} />
-                  {i < detail.lineage.length - 1 && (
-                    <div className="w-full h-0.5 bg-gray-200 mt-1.5 mx-1" />
-                  )}
-                  <div className="mt-2 text-center">
-                    <p className="text-xs font-semibold text-gray-700">{node.stage}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{node.label}</p>
-                    {node.file && <p className="text-xs text-gray-400 truncate max-w-24">{node.file}</p>}
-                    <StatusBadge status={node.status} className="mt-1" />
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* 操作历史 */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
-              <Clock size={16} className="text-orange-500" /> 操作历史
-            </h2>
-            <div className="space-y-3">
-              {displayedHistory.map((h) => (
-                <div key={h.id} className="flex items-start gap-3 pb-3 border-b border-gray-50 last:border-0">
-                  <div className="flex-shrink-0 w-6 h-6 rounded-full bg-gray-100 flex items-center justify-center text-xs">
-                    {h.type === 'ai' ? '🤖' : h.type === 'system' ? '⚙️' : '👤'}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium text-gray-800">{h.action}</p>
-                      <StatusBadge status={h.status} />
-                    </div>
-                    <p className="text-xs text-gray-400 mt-0.5">
-                      {h.operator} · {h.time}
-                    </p>
-                    {h.note && <p className="text-xs text-gray-500 mt-1 italic">{h.note}</p>}
-                  </div>
-                </div>
-              ))}
-            </div>
-            {detail.history.length > 3 && (
-              <button
-                onClick={() => setExpandHistory(!expandHistory)}
-                className="mt-2 flex items-center gap-1 text-xs text-blue-600 hover:text-blue-700"
-              >
-                {expandHistory ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-                {expandHistory ? '收起' : `展开全部 (${detail.history.length})`}
-              </button>
-            )}
-          </div>
-
-          {/* 版本管理 */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
-              <FileText size={16} className="text-purple-500" /> 版本管理
-            </h2>
-            <div className="space-y-2">
-              {detail.versions.map((v) => (
-                <div key={v.version} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                  <div>
-                    <span className="text-sm font-semibold text-gray-800">{v.version}</span>
-                    {v.status === 'current' && (
-                      <span className="ml-2 text-xs text-green-600 bg-green-50 px-1.5 py-0.5 rounded">当前</span>
-                    )}
-                    <p className="text-xs text-gray-400 mt-0.5">{v.note}</p>
-                  </div>
-                  <div className="text-right text-xs text-gray-400">
-                    <p>{v.time}</p>
-                    <p>{v.operator}</p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
 
         {/* 右侧列 */}
@@ -631,28 +577,6 @@ export function AssetDetailPage() {
                 <div className="text-center py-2 text-gray-400 text-sm">暂无元数据</div>
               )}
             </dl>
-          </div>
-
-          {/* 权限 */}
-          <div className="bg-white rounded-xl border border-gray-200 p-5">
-            <h2 className="font-semibold text-gray-800 mb-3 flex items-center gap-2">
-              <Shield size={15} className="text-blue-500" /> 权限级别
-            </h2>
-            <div className="grid grid-cols-2 gap-2">
-              {PERMISSION_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => handlePermissionChange(opt.value)}
-                  className={`px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
-                    detail.permission === opt.value
-                      ? `${opt.color} border-current`
-                      : 'border-gray-200 text-gray-600 hover:bg-gray-50'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
           </div>
 
           {/* 标签 */}

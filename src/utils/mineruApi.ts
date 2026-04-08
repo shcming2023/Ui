@@ -25,6 +25,10 @@ export interface MinerUTaskResult {
   taskId: string;
   state: 'pending' | 'processing' | 'done' | 'failed';
   progress?: number;
+  /** 已解析页数（MinerU extract_progress.extracted_pages） */
+  extractedPages?: number;
+  /** 总页数（MinerU extract_progress.total_pages） */
+  totalPages?: number;
   markdown?: string;       // 解析后的 Markdown 文本
   zipUrl?: string;         // 完整结果 ZIP 下载链接
   errMsg?: string;
@@ -167,6 +171,7 @@ export async function submitMinerUTaskByFile(
 
 /** 查询批量任务状态
  *  官方文档：GET /api/v4/extract-results/batch/{batch_id}
+ *  网络临时故障时自动重试 2 次（DNS EAI_AGAIN / 502 等）
  */
 export async function queryMinerUTask(
   batchId: string,
@@ -177,38 +182,75 @@ export async function queryMinerUTask(
 
   const endpoint = `${PROXY_BASE}/api/v4/extract-results/batch/${batchId}`;
 
-  const res = await fetch(endpoint, {
-    headers: { Authorization: `Bearer ${apiKey}` },
-  });
+  // 网络临时故障重试（DNS 解析失败、502、超时等），最多 3 次，间隔 3s
+  let lastErr: unknown;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await fetch(endpoint, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(15_000),
+      });
 
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`MinerU 查询失败: HTTP ${res.status} — ${text}`);
+      if (!res.ok) {
+        const text = await res.text();
+        // 5xx 可重试，4xx 直接抛出
+        if (res.status >= 500 && i < 2) {
+          lastErr = new Error(`MinerU 查询失败: HTTP ${res.status} — ${text}`);
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+        throw new Error(`MinerU 查询失败: HTTP ${res.status} — ${text}`);
+      }
+
+      const json = await res.json();
+      if (json.code !== 0) {
+        throw new Error(`MinerU 查询失败: ${json.msg || JSON.stringify(json)}`);
+      }
+
+      const fileResult = json.data?.extract_result?.[0];
+      if (!fileResult) {
+        return { taskId: batchId, state: 'processing', progress: 0 };
+      }
+
+      const state: MinerUTaskResult['state'] =
+        fileResult.state === 'done' ? 'done'
+        : fileResult.state === 'failed' ? 'failed'
+        : (fileResult.state === 'running' || fileResult.state === 'processing') ? 'processing'
+        : 'pending';
+
+      const extractedPages: number | undefined = fileResult.extract_progress?.extracted_pages;
+      const totalPages: number | undefined = fileResult.extract_progress?.total_pages;
+
+      // 用真实页数比例作为进度（0-100）
+      const realProgress = (extractedPages != null && totalPages != null && totalPages > 0)
+        ? Math.round((extractedPages / totalPages) * 100)
+        : (fileResult.progress ?? 0);
+
+      return {
+        taskId: batchId,
+        state,
+        progress: realProgress,
+        extractedPages,
+        totalPages,
+        zipUrl: fileResult.full_zip_url || fileResult.zip_url || undefined,
+        errMsg: fileResult.err_msg || undefined,
+      };
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      // 网络层错误（DNS/超时/连接拒绝）可重试
+      const isNetworkErr = msg.includes('EAI_AGAIN') || msg.includes('ECONNRESET')
+        || msg.includes('ETIMEDOUT') || msg.includes('fetch') || msg.includes('abort');
+      if (isNetworkErr && i < 2) {
+        console.warn(`[MinerU] queryMinerUTask 网络错误 (${i + 1}/3):`, msg);
+        await new Promise((r) => setTimeout(r, 3000));
+        continue;
+      }
+      throw err;
+    }
   }
 
-  const json = await res.json();
-  if (json.code !== 0) {
-    throw new Error(`MinerU 查询失败: ${json.msg || JSON.stringify(json)}`);
-  }
-
-  const fileResult = json.data?.extract_result?.[0];
-  if (!fileResult) {
-    return { taskId: batchId, state: 'processing', progress: 0 };
-  }
-
-  const state: MinerUTaskResult['state'] =
-    fileResult.state === 'done' ? 'done'
-    : fileResult.state === 'failed' ? 'failed'
-    : fileResult.state === 'running' ? 'processing'
-    : 'pending';
-
-  return {
-    taskId: batchId,
-    state,
-    progress: fileResult.progress ?? 0,
-    zipUrl: fileResult.full_zip_url || fileResult.zip_url || undefined,
-    errMsg: fileResult.err_msg || undefined,
-  };
+  throw lastErr instanceof Error ? lastErr : new Error('MinerU 查询多次失败');
 }
 
 // ─── 从 MinIO 或 CDN 获取 Markdown 内容 ──────────────────────
@@ -287,58 +329,92 @@ export async function runMinerUPipeline(
   configOrProgress?: MinerUConfig | ((progress: number, state: string) => void),
   onProgressArg?: (progress: number, state: string) => void,
 ): Promise<MinerUTaskResult> {
-  let batchId: string;
-
   // 判断调用模式
-  if (fileOrUrl instanceof File) {
-    // 模式 B：File 对象
-    const cb = configOrProgress as ((p: number, s: string) => void) | undefined;
-    cb?.(0, '准备上传...');
-    batchId = await submitMinerUTaskByFile(
-      fileOrUrl,
-      fileNameOrConfig as MinerUConfig,
-      cb,
-    );
-  } else {
-    // 模式 A：URL 字符串（兼容旧调用）
-    const cb = onProgressArg;
-    cb?.(0, '提交解析任务...');
-    batchId = await submitMinerUTask(
-      fileOrUrl,
-      fileNameOrConfig as string,
-      configOrProgress as MinerUConfig,
-    );
+  const isFileMode = fileOrUrl instanceof File;
+  const config = (isFileMode ? fileNameOrConfig : configOrProgress) as MinerUConfig;
+  const onProgress = (isFileMode
+    ? configOrProgress
+    : onProgressArg) as ((p: number, s: string) => void) | undefined;
+
+  // 重试参数：最多 3 次，指数退避（10s / 30s / 60s）
+  const MAX_RETRIES = 3;
+  const RETRY_DELAYS = [10_000, 30_000, 60_000];
+
+  let lastError: Error = new Error('MinerU 解析失败');
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const retryLabel = MAX_RETRIES > 1 ? ` (第 ${attempt}/${MAX_RETRIES} 次)` : '';
+
+    try {
+      let batchId: string;
+
+      if (isFileMode) {
+        onProgress?.(0, `准备上传...${retryLabel}`);
+        batchId = await submitMinerUTaskByFile(
+          fileOrUrl as File,
+          fileNameOrConfig as MinerUConfig,
+          onProgress,
+        );
+      } else {
+        onProgress?.(0, `提交解析任务...${retryLabel}`);
+        batchId = await submitMinerUTask(
+          fileOrUrl as string,
+          fileNameOrConfig as string,
+          configOrProgress as MinerUConfig,
+        );
+      }
+
+      // 轮询状态
+      const maxAttempts = Math.ceil((config.timeout || 1200) / 5);
+      let pollAttempt = 0;
+
+      while (pollAttempt < maxAttempts) {
+        await new Promise((r) => setTimeout(r, 5000));
+        pollAttempt++;
+
+        const result = await queryMinerUTask(batchId, config);
+
+        // 优先用真实页数进度，次用轮询估算
+        let displayPct: number;
+        if (result.extractedPages != null && result.totalPages != null && result.totalPages > 0) {
+          // 真实进度：25%(上传完成) ~ 95%
+          displayPct = Math.round(25 + (result.extractedPages / result.totalPages) * 70);
+        } else {
+          displayPct = Math.min(Math.round(25 + (pollAttempt / maxAttempts) * 70), 95);
+        }
+
+        const pageInfo = (result.extractedPages != null && result.totalPages != null)
+          ? ` (${result.extractedPages}/${result.totalPages} 页)`
+          : ` (${pollAttempt}/${maxAttempts})`;
+
+        onProgress?.(displayPct, `解析中${retryLabel}${pageInfo}`);
+
+        if (result.state === 'done') {
+          onProgress?.(100, '解析完成');
+          return result;
+        }
+
+        if (result.state === 'failed') {
+          throw new Error(`MinerU 解析失败: ${result.errMsg || '未知错误'}`);
+        }
+      }
+
+      throw new Error(`MinerU 解析超时（已等待 ${config.timeout || 1200} 秒）`);
+
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+
+      // 超时不重试（服务端已超时，重试无意义）
+      if (lastError.message.includes('超时') || attempt >= MAX_RETRIES) {
+        break;
+      }
+
+      const waitSec = RETRY_DELAYS[attempt - 1] / 1000;
+      console.warn(`[MinerU] 第 ${attempt} 次失败，${waitSec}s 后重试:`, lastError.message);
+      onProgress?.(0, `解析失败，${waitSec}s 后自动重试 (${attempt}/${MAX_RETRIES})...`);
+      await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt - 1]));
+    }
   }
 
-  // 轮询状态（两种模式相同）
-  const config = (fileOrUrl instanceof File ? fileNameOrConfig : configOrProgress) as MinerUConfig;
-  const onProgress = fileOrUrl instanceof File
-    ? (configOrProgress as ((p: number, s: string) => void) | undefined)
-    : onProgressArg;
-
-  const maxAttempts = Math.ceil((config.timeout || 1200) / 5);
-  let attempt = 0;
-
-  while (attempt < maxAttempts) {
-    await new Promise((r) => setTimeout(r, 5000));
-    attempt++;
-
-    const result = await queryMinerUTask(batchId, config);
-    const pct = Math.min(Math.round(25 + (attempt / maxAttempts) * 70), 95);
-    onProgress?.(
-      result.progress ? Math.max(pct, Math.round(25 + result.progress * 0.7)) : pct,
-      `解析中... (${attempt}/${maxAttempts})`,
-    );
-
-    if (result.state === 'done') {
-      onProgress?.(100, '解析完成');
-      return result;
-    }
-
-    if (result.state === 'failed') {
-      throw new Error(`MinerU 解析失败: ${result.errMsg || '未知错误'}`);
-    }
-  }
-
-  throw new Error(`MinerU 解析超时（已等待 ${config.timeout || 1200} 秒）`);
+  throw lastError;
 }

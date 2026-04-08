@@ -220,8 +220,8 @@ importers:
         specifier: 4.1.12
         version: 4.1.12
       typescript:
-        specifier: ^6.0.2
-        version: 6.0.2
+        specifier: ^5.8.3
+        version: 5.9.3
       vite:
         specifier: 6.3.5
         version: 6.3.5(jiti@2.6.1)(lightningcss@1.30.1)
@@ -2780,8 +2780,8 @@ packages:
   typedarray@0.0.6:
     resolution: {integrity: sha512-/aCDEGatGvZ2BIk+HmLf4ifCJFwvKFNb9/JeZPMulfgFracn9QFcAf5GO8B/mweUjSoblS5In0cWhqpfs/5PQA==}
 
-  typescript@6.0.2:
-    resolution: {integrity: sha512-bGdAIrZ0wiGDo5l8c++HWtbaNCWTS4UTv7RaTH/ThVIgjkveJt83m74bBHMJkuCbslY8ixgLBVZJIOiQlQTjfQ==}
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -5389,7 +5389,7 @@ snapshots:
 
   typedarray@0.0.6: {}
 
-  typescript@6.0.2: {}
+  typescript@5.9.3: {}
 
   unpipe@1.0.0: {}
 

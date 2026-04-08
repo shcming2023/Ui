@@ -1,7 +1,34 @@
 import { useState, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Upload, Grid, List, Filter, SortAsc, AlertTriangle, RefreshCw } from 'lucide-react';
+import { Search, Upload, Grid, List, SortAsc, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
+
+/** 兼容 iframe 环境的删除确认（window.confirm 在内置浏览器中可能被屏蔽） */
+function confirmDelete(message: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    // 先尝试原生 confirm，若返回 undefined（被沙箱拦截）则改用 toast
+    let result: boolean | undefined;
+    try { result = window.confirm(message); } catch { result = undefined; }
+    if (result !== undefined) {
+      resolve(result);
+      return;
+    }
+    // 降级：用 sonner toast 替代确认框
+    toast(message, {
+      duration: 8000,
+      action: {
+        label: '确认删除',
+        onClick: () => resolve(true),
+      },
+      cancel: {
+        label: '取消',
+        onClick: () => resolve(false),
+      },
+      onDismiss: () => resolve(false),
+      onAutoClose: () => resolve(false),
+    });
+  });
+}
 import { useAppStore } from '../../store/appContext';
 import { StatusBadge } from '../components/StatusBadge';
 import type { TabFilter, SortOption, ViewMode } from '../../store/types';
@@ -89,7 +116,7 @@ export function SourceMaterialsPage() {
       return;
     }
     for (const file of files) {
-      const newId = Date.now() + Math.random();
+      const newId = Date.now();
       
       dispatch({
         type: 'ADD_MATERIAL',
@@ -114,7 +141,9 @@ export function SourceMaterialsPage() {
         const formData = new FormData();
         formData.append('file', file);
 
-        const response = await fetch('/__proxy/upload/upload', {
+        // 通过 Vite proxy 路由到 upload-server，兼容所有部署环境
+        const uploadUrl = `/__proxy/upload/upload`;
+        const response = await fetch(uploadUrl, {
           method: 'POST',
           body: formData,
         });
@@ -193,11 +222,36 @@ export function SourceMaterialsPage() {
   };
 
   // 批量删除
-  const handleBatchDelete = () => {
+  const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return;
+    const ok = await confirmDelete(`确定删除选中的 ${selectedIds.size} 条资料吗？此操作不可撤销。`);
+    if (!ok) return;
     dispatch({ type: 'DELETE_MATERIAL', payload: Array.from(selectedIds) });
     setSelectedIds(new Set());
     toast.success(`已删除 ${selectedIds.size} 条资料`);
+  };
+
+  // 单条删除
+  const handleDelete = async (e: React.MouseEvent, id: number) => {
+    e.stopPropagation();
+    const material = state.materials.find((m) => m.id === id);
+    const name = material?.title ?? '该资料';
+    const ok = await confirmDelete(`确定删除「${name}」吗？此操作不可撤销。`);
+    if (!ok) return;
+    dispatch({ type: 'DELETE_MATERIAL', payload: [id] });
+    setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    toast.success('已删除');
+  };
+
+  // 清空所有数据（localStorage + 内存，SQLite 通过 DELETE_MATERIAL 联动删除）
+  const handleClearAll = async () => {
+    if (state.materials.length === 0) { toast('暂无数据'); return; }
+    const ok = await confirmDelete(`确定清空全部 ${state.materials.length} 条资料吗？此操作不可撤销。`);
+    if (!ok) return;
+    const allIds = state.materials.map((m) => m.id);
+    dispatch({ type: 'DELETE_MATERIAL', payload: allIds });
+    setSelectedIds(new Set());
+    toast.success(`已清空全部 ${allIds.length} 条资料`);
   };
 
   return (
@@ -217,6 +271,13 @@ export function SourceMaterialsPage() {
               删除选中 ({selectedIds.size})
             </button>
           )}
+          <button
+            onClick={handleClearAll}
+            className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
+          >
+            <Trash2 size={15} />
+            清空全部
+          </button>
           <button
             data-testid="reset-config-btn"
             onClick={handleResetConfig}
@@ -340,12 +401,13 @@ export function SourceMaterialsPage() {
                 <th className="px-4 py-3 text-left font-semibold text-gray-700">上传者</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-700">上传时间</th>
                 <th className="px-4 py-3 text-left font-semibold text-gray-700">状态</th>
+                <th className="px-4 py-3 text-left font-semibold text-gray-700">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
               {currentItems.length === 0 && (
                 <tr>
-                  <td colSpan={7} className="text-center py-12 text-gray-400">暂无数据</td>
+                  <td colSpan={8} className="text-center py-12 text-gray-400">暂无数据</td>
                 </tr>
               )}
               {currentItems.map((m) => (
@@ -385,6 +447,15 @@ export function SourceMaterialsPage() {
                   <td className="px-4 py-3 text-gray-500">{m.uploadTime}</td>
                   <td className="px-4 py-3">
                     <StatusBadge status={m.status} />
+                  </td>
+                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={(e) => handleDelete(e, m.id)}
+                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                      title="删除"
+                    >
+                      <Trash2 size={15} />
+                    </button>
                   </td>
                 </tr>
               ))}

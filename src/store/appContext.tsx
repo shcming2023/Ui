@@ -226,14 +226,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
         if (cancelled) return;
 
+        // 判断 DB 是否已完成过初始化（通过 settings.initialized 标记）
+        const isDbInitialized = settings?.initialized === true;
         const hasMaterials = Array.isArray(materials) && materials.length > 0;
 
-        if (hasMaterials) {
-          // SQLite 有数据：直接派发一个特殊 action 覆盖内存 state
+        if (hasMaterials || isDbInitialized) {
+          // DB 已初始化（有数据 or 有初始化标记）：直接用 DB 数据覆盖内存 state
           dispatch({
             type: 'HYDRATE_FROM_DB',
             payload: {
-              materials:      materials ?? undefined,
+              materials:      Array.isArray(materials) ? materials : [],
               assetDetails:   assetDetails ?? undefined,
               processTasks:   processTasks ?? undefined,
               tasks:          tasks ?? undefined,
@@ -245,10 +247,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               mineruConfig:   settings?.mineruConfig ? mergeConfigWithFallback(initialMinerUConfig, settings.mineruConfig) : undefined,
             },
           });
-          console.log(`[appContext] Hydrated from SQLite (${materials?.length} materials)`);
+          console.log(`[appContext] Hydrated from DB (${materials?.length ?? 0} materials, initialized=${isDbInitialized})`);
         } else {
-          // SQLite 为空：将当前内存数据 bulk-restore 写入 SQLite（种子数据）
-          console.log('[appContext] SQLite empty, seeding from current state...');
+          // DB 从未初始化过（全新部署）：将当前内存数据 seed 写入 DB，并打标记
+          console.log('[appContext] DB not initialized, seeding from current state...');
           await dbPost('/bulk-restore', {
             materials:      state.materials,
             assetDetails:   state.assetDetails,
@@ -261,7 +263,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             aiConfig:       state.aiConfig,
             mineruConfig:   state.mineruConfig,
           });
-          console.log('[appContext] Seeded SQLite with initial data');
+          // 打初始化标记，后续刷新不再 seed
+          await dbPut('/settings/initialized', true);
+          console.log('[appContext] DB seeded and marked as initialized');
         }
       } catch (err) {
         console.warn('[appContext] SQLite hydration failed, using localStorage fallback:', err);
@@ -289,43 +293,37 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     saveToStorage(LS.MATERIALS, state.materials);
-    if (!hydratedRef.current) return;
 
     const currentIds = new Set(state.materials.map((m) => m.id));
 
-    // 检测删除：上一轮有、这一轮没有的 id 需要从 SQLite 删除
-    const deletedIds = [...prevMaterialIds.current].filter((id) => !currentIds.has(id));
-    if (deletedIds.length > 0) {
-      dbDelete('/materials', { ids: deletedIds });
+    if (hydratedRef.current) {
+      // 检测删除：上一轮有、这一轮没有的 id 需要从 SQLite 删除
+      const deletedIds = [...prevMaterialIds.current].filter((id) => !currentIds.has(id));
+      if (deletedIds.length > 0) {
+        dbDelete('/materials', { ids: deletedIds });
+      }
+      // upsert 当前所有 materials
+      for (const m of state.materials) {
+        dbPost('/materials', m);
+      }
     }
-    prevMaterialIds.current = currentIds;
 
-    // upsert 当前所有 materials
-    for (const m of state.materials) {
-      dbPost('/materials', m);
-    }
+    // 无论是否 hydrated，始终更新 prevMaterialIds，确保后续删除比对正确
+    prevMaterialIds.current = currentIds;
   }, [state.materials]);
 
   useEffect(() => {
     saveToStorage(LS.ASSET_DETAILS, state.assetDetails);
-    if (!hydratedRef.current) return;
 
     const currentIds = new Set(Object.keys(state.assetDetails).map(Number));
 
-    // 检测删除
-    const deletedIds = [...prevAssetIds.current].filter((id) => !currentIds.has(id));
-    if (deletedIds.length > 0) {
-      // asset_details 表的批量删除由 /materials DELETE 联动，但以防万一也显式删
-      for (const id of deletedIds) {
-        // db-server 中 /materials DELETE 已联动删除 asset_details，这里 fire-and-forget 保险起见
-        dbDelete('/materials', { ids: [id] });
+    if (hydratedRef.current) {
+      for (const [id, detail] of Object.entries(state.assetDetails)) {
+        dbPut(`/asset-details/${id}`, detail);
       }
     }
-    prevAssetIds.current = currentIds;
 
-    for (const [id, detail] of Object.entries(state.assetDetails)) {
-      dbPut(`/asset-details/${id}`, detail);
-    }
+    prevAssetIds.current = currentIds;
   }, [state.assetDetails]);
 
   useEffect(() => {
@@ -351,50 +349,56 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     saveToStorage(LS.PRODUCTS, state.products);
-    if (!hydratedRef.current) return;
 
     const currentIds = new Set(state.products.map((p) => p.id));
-    const deletedIds = [...prevProductIds.current].filter((id) => !currentIds.has(id));
-    if (deletedIds.length > 0) {
-      dbDelete('/products', { ids: deletedIds });
-    }
-    prevProductIds.current = currentIds;
 
-    for (const p of state.products) {
-      dbPost('/products', p);
+    if (hydratedRef.current) {
+      const deletedIds = [...prevProductIds.current].filter((id) => !currentIds.has(id));
+      if (deletedIds.length > 0) {
+        dbDelete('/products', { ids: deletedIds });
+      }
+      for (const p of state.products) {
+        dbPost('/products', p);
+      }
     }
+
+    prevProductIds.current = currentIds;
   }, [state.products]);
 
   useEffect(() => {
     saveToStorage(LS.FLEXIBLE_TAGS, state.flexibleTags);
-    if (!hydratedRef.current) return;
 
     const currentIds = new Set(state.flexibleTags.map((t) => t.id));
-    const deletedIds = [...prevTagIds.current].filter((id) => !currentIds.has(id));
-    if (deletedIds.length > 0) {
-      dbDelete('/flexible-tags', { ids: deletedIds });
-    }
-    prevTagIds.current = currentIds;
 
-    for (const tag of state.flexibleTags) {
-      dbPost('/flexible-tags', tag);
+    if (hydratedRef.current) {
+      const deletedIds = [...prevTagIds.current].filter((id) => !currentIds.has(id));
+      if (deletedIds.length > 0) {
+        dbDelete('/flexible-tags', { ids: deletedIds });
+      }
+      for (const tag of state.flexibleTags) {
+        dbPost('/flexible-tags', tag);
+      }
     }
+
+    prevTagIds.current = currentIds;
   }, [state.flexibleTags]);
 
   useEffect(() => {
     saveToStorage(LS.AI_RULES, state.aiRules);
-    if (!hydratedRef.current) return;
 
     const currentIds = new Set(state.aiRules.map((r) => r.id));
-    const deletedIds = [...prevAiRuleIds.current].filter((id) => !currentIds.has(id));
-    if (deletedIds.length > 0) {
-      dbDelete('/ai-rules', { ids: deletedIds });
-    }
-    prevAiRuleIds.current = currentIds;
 
-    for (const rule of state.aiRules) {
-      dbPost('/ai-rules', rule);
+    if (hydratedRef.current) {
+      const deletedIds = [...prevAiRuleIds.current].filter((id) => !currentIds.has(id));
+      if (deletedIds.length > 0) {
+        dbDelete('/ai-rules', { ids: deletedIds });
+      }
+      for (const rule of state.aiRules) {
+        dbPost('/ai-rules', rule);
+      }
     }
+
+    prevAiRuleIds.current = currentIds;
   }, [state.aiRules]);
 
   useEffect(() => {

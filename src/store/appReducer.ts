@@ -65,7 +65,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         title: m.title,
         status: m.status,
         assetId: `MAT-${m.id}`,
-        permission: 'internal' as const,
         tags: m.tags,
         metadata: {
           subject: m.metadata.subject || '-',
@@ -81,15 +80,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           summary: m.metadata.summary || '',
           previewUrl: m.previewUrl || '',
         },
-        lineage: [
-          { stage: '原始资料', label: m.title, color: 'blue', status: m.status, file: null, size: m.size || null },
-        ],
-        history: [
-          { id: 1, action: '文件上传', time: '刚刚', operator: m.uploader || '管理员', type: 'user' as const, status: 'completed' as const },
-        ],
-        versions: [
-          { version: 'v1.0', status: 'current', time: '刚刚', operator: m.uploader || '管理员', note: '初始版本' },
-        ],
         relatedAssets: [],
       };
       return {
@@ -251,17 +241,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
               [materialId]: {
                 ...state.assetDetails[materialId],
                 status: 'completed',
-                history: [
-                  ...state.assetDetails[materialId].history,
-                  {
-                    id: state.assetDetails[materialId].history.length + 1,
-                    action: '任务完成',
-                    time: '刚刚',
-                    operator: '系统',
-                    type: 'system',
-                    status: 'completed',
-                  },
-                ],
               },
             }
           : state.assetDetails;
@@ -347,21 +326,6 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
 
     // ==================== 资产详情操作 ====================
-
-    /**
-     * 更新资产权限级别
-     */
-    case 'UPDATE_ASSET_PERMISSION':
-      return {
-        ...state,
-        assetDetails: {
-          ...state.assetDetails,
-          [action.payload.id]: {
-            ...state.assetDetails[action.payload.id],
-            permission: action.payload.permission,
-          },
-        },
-      };
 
     /**
      * 更新资产标签列表

@@ -26,9 +26,6 @@ export type TaskFilter = 'all' | 'rawcode' | 'cleancode' | 'product';
 /** Tab 过滤类型 */
 export type TabFilter = 'all' | 'pending' | 'processing' | 'reviewing' | 'failed' | 'completed';
 
-/** 权限级别 */
-export type PermissionLevel = 'internal' | 'production' | 'review' | 'public';
-
 /** 标签颜色 */
 export type TagColor =
   | 'blue' | 'purple' | 'red' | 'green' | 'orange'
@@ -182,40 +179,9 @@ export interface AssetDetail {
   status: AssetStatus;
   aiStatus?: AiStatus;           // AI 分析状态（从 Material 动态构建时映射）
   assetId: string;
-  permission: PermissionLevel;
   tags: string[];
   metadata: Record<string, string | number>;
-  lineage: AssetLineageNode[];
-  history: AssetHistoryEntry[];
-  versions: AssetVersion[];
   relatedAssets: { id: number; title: string; type: string; status: AssetStatus }[];
-}
-
-export interface AssetLineageNode {
-  stage: string;
-  label: string;
-  color: string;
-  status: AssetStatus;
-  file: string | null;
-  size: string | null;
-}
-
-export interface AssetHistoryEntry {
-  id: number;
-  action: string;
-  time: string;
-  operator: string;
-  type: 'system' | 'ai' | 'user';
-  note?: string;
-  status: AssetStatus;
-}
-
-export interface AssetVersion {
-  version: string;
-  status: string;
-  time: string;
-  operator: string;
-  note: string;
 }
 
 // ==================== Store 状态 ====================
@@ -302,7 +268,6 @@ export type AppAction =
   | { type: 'UPDATE_AI_CONFIG'; payload: Partial<AiConfig> }
   | { type: 'UPDATE_MINERU_CONFIG'; payload: Partial<MinerUConfig> }
   // 资产详情操作
-  | { type: 'UPDATE_ASSET_PERMISSION'; payload: { id: number; permission: PermissionLevel } }
   | { type: 'UPDATE_ASSET_TAGS'; payload: { id: number; tags: string[] } }
   // 删除操作
   | { type: 'DELETE_PRODUCT'; payload: number[] }
