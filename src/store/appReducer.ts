@@ -34,6 +34,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...(p.aiRuleSettings !== undefined ? { aiRuleSettings: p.aiRuleSettings } : {}),
         ...(p.aiConfig       !== undefined ? { aiConfig:       p.aiConfig }       : {}),
         ...(p.mineruConfig   !== undefined ? { mineruConfig:   p.mineruConfig }   : {}),
+        ...(p.minioConfig    !== undefined ? { minioConfig:    p.minioConfig }    : {}),
       };
     }
 
@@ -323,6 +324,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         mineruConfig: { ...state.mineruConfig, ...action.payload },
+      };
+
+    /**
+     * 更新 MinIO 存储配置（部分更新）
+     */
+    case 'UPDATE_MINIO_CONFIG':
+      return {
+        ...state,
+        minioConfig: { ...state.minioConfig, ...action.payload },
       };
 
     // ==================== 资产详情操作 ====================

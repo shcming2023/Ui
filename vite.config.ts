@@ -22,6 +22,10 @@ export default defineConfig({
       '.manus.computer',
       'localhost',
     ],
+    headers: {
+      'X-Frame-Options': 'ALLOWALL',
+      'Content-Security-Policy': "frame-ancestors *",
+    },
     proxy: {
       // ⚠️ mineru-cdn 必须在 mineru 之前，否则被前缀匹配吞掉
       '/__proxy/mineru-cdn': {

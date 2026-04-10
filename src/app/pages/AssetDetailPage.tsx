@@ -1,11 +1,354 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Tag, FileText, Play, Cpu, CheckCircle, XCircle, Loader } from 'lucide-react';
+import { ArrowLeft, Tag, FileText, Play, Cpu, CheckCircle, XCircle, Loader, Save, Database, ExternalLink, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import { StatusBadge } from '../components/StatusBadge';
 import type { ProcessTask } from '../../store/types';
 import { runMinerUPipeline } from '../../utils/mineruApi';
+
+// ─── 枚举选项定义 ──────────────────────────────────────────────
+
+const LANGUAGE_OPTIONS = ['中文', '英文', '双语', '其他'];
+const GRADE_OPTIONS = ['G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'G8', 'G9', 'G10', 'G11', 'G12', '通用'];
+const SUBJECT_OPTIONS = ['语文', '英语', '数学', '物理', '化学', '生物', '历史', '地理', '政治', '科学', '综合', '其他'];
+const COUNTRY_OPTIONS = ['中国', '英国', '美国', '新加坡', '澳大利亚', '加拿大', '其他'];
+const MATERIAL_TYPE_OPTIONS = ['课本', '讲义', '练习册', '试卷', '答案', '教案', '课件', '大纲', '其他'];
+
+// ─── 元数据字段中文标签 ────────────────────────────────────────
+const META_LABELS: Record<string, string> = {
+  language:    '语言',
+  grade:       '年级',
+  subject:     '学科',
+  country:     '国家/地区',
+  format:      '格式',
+  size:        '文件大小',
+  pages:       '页数',
+  type:        '资料类型',
+  summary:     '内容摘要',
+  aiConfidence: '识别置信度',
+};
+
+// ─── 文件大小格式化 ────────────────────────────────────────────
+function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+}
+
+// ─── MinIO 对象类型 ────────────────────────────────────────────
+interface MinioObject {
+  objectName: string;
+  name: string;
+  size: number;
+  lastModified: string;
+  presignedUrl: string;
+}
+
+// ─── 文件溯源卡片 ──────────────────────────────────────────────
+function FileLineageCard({
+  material,
+}: {
+  material: NonNullable<ReturnType<typeof useAppStore>['state']['materials'][0]>;
+}) {
+  const objectName = material.metadata?.objectName as string | undefined;
+  const provider   = material.metadata?.provider as string | undefined;
+  const markdownObjectName = material.metadata?.markdownObjectName as string | undefined;
+  const parsedFilesCount   = material.metadata?.parsedFilesCount as string | undefined;
+  const parsedAt           = material.metadata?.parsedAt as string | undefined;
+  const aiConfidence       = material.metadata?.aiConfidence as string | undefined;
+  const aiAnalyzedAt       = material.metadata?.aiAnalyzedAt as string | undefined;
+
+  const [originalUrl, setOriginalUrl]   = useState<string | null>(null);
+  const [refreshing, setRefreshing]     = useState(false);
+  const [parsedFiles, setParsedFiles]   = useState<MinioObject[]>([]);
+  const [listLoading, setListLoading]   = useState(false);
+  const [listExpanded, setListExpanded] = useState(false);
+  const [mdPreview, setMdPreview]       = useState<string | null>(null);
+  const [mdLoading, setMdLoading]       = useState(false);
+  const hasFetched = useRef(false);
+
+  // 挂载时刷新原始文件预签名 URL
+  useEffect(() => {
+    if (!objectName) return;
+    fetch(`/__proxy/upload/presign?objectName=${encodeURIComponent(objectName)}`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => { if (d?.url) setOriginalUrl(d.url); })
+      .catch(() => {});
+  }, [objectName]);
+
+  // 展开解析产物列表时懒加载
+  const handleExpandParsed = async () => {
+    const next = !listExpanded;
+    setListExpanded(next);
+    if (!next || hasFetched.current || !material.id) return;
+    hasFetched.current = true;
+    setListLoading(true);
+    try {
+      const r = await fetch(`/__proxy/upload/list?prefix=${encodeURIComponent(`parsed/${material.id}`)}`);
+      if (r.ok) {
+        const d = await r.json();
+        setParsedFiles(d.objects ?? []);
+      }
+    } catch {
+      // silent
+    } finally {
+      setListLoading(false);
+    }
+  };
+
+  // 手动刷新原始文件 URL
+  const handleRefreshOriginal = async () => {
+    if (!objectName) return;
+    setRefreshing(true);
+    try {
+      const r = await fetch(`/__proxy/upload/presign?objectName=${encodeURIComponent(objectName)}`);
+      const d = await r.json();
+      if (d?.url) { setOriginalUrl(d.url); toast.success('访问链接已刷新'); }
+    } catch {
+      toast.error('刷新失败，请检查 MinIO 连接');
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // 预览 full.md
+  const handlePreviewMd = async (url: string) => {
+    if (mdPreview !== null) { setMdPreview(null); return; }
+    setMdLoading(true);
+    try {
+      const r = await fetch(url);
+      if (r.ok) setMdPreview(await r.text());
+      else toast.error('无法读取 Markdown 内容');
+    } catch {
+      toast.error('读取失败');
+    } finally {
+      setMdLoading(false);
+    }
+  };
+
+  const hasOriginal = !!(objectName || material.metadata?.fileUrl);
+  const hasParsed   = !!(markdownObjectName || (parsedFilesCount && parsedFilesCount !== '0'));
+  const hasAi       = material.aiStatus === 'analyzed';
+
+  if (!hasOriginal && !hasParsed && !hasAi) return null;
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-5">
+      <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
+        <Database size={15} className="text-blue-500" /> 文件溯源
+      </h2>
+
+      <div className="space-y-3">
+        {/* ── 层 1：原始文件 ── */}
+        {hasOriginal && (
+          <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+            <p className="text-xs font-semibold text-gray-600 mb-2 flex items-center gap-1.5">
+              <span className="w-4 h-4 rounded-full bg-blue-100 text-blue-600 text-[10px] flex items-center justify-center font-bold">1</span>
+              原始文件上传
+            </p>
+            <div className="space-y-1 text-xs text-gray-500">
+              {objectName && (
+                <p className="break-all font-mono text-gray-400">
+                  <span className="text-gray-600 not-italic">路径：</span>{objectName}
+                </p>
+              )}
+              <div className="flex items-center gap-3 flex-wrap">
+                {material.size && (
+                  <span>大小：<span className="text-gray-700">{material.size}</span></span>
+                )}
+                {material.metadata?.format && (
+                  <span>格式：<span className="text-gray-700">{material.metadata.format as string}</span></span>
+                )}
+                {provider && (
+                  <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${provider === 'minio' ? 'bg-blue-50 text-blue-600' : 'bg-gray-200 text-gray-500'}`}>
+                    {provider === 'minio' ? 'MinIO' : 'tmpfiles'}
+                  </span>
+                )}
+              </div>
+              {material.uploadedAt && (
+                <p>上传时间：<span className="text-gray-700">{new Date(material.uploadedAt).toLocaleString('zh-CN')}</span></p>
+              )}
+            </div>
+            {objectName && (
+              <div className="flex items-center gap-2 mt-2">
+                <button
+                  onClick={handleRefreshOriginal}
+                  disabled={refreshing}
+                  className="flex items-center gap-1 text-[11px] px-2 py-1 rounded border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  <RefreshCw size={10} className={refreshing ? 'animate-spin' : ''} /> 刷新链接
+                </button>
+                {originalUrl && (
+                  <>
+                    <a href={originalUrl} target="_blank" rel="noreferrer"
+                      className="flex items-center gap-1 text-[11px] px-2 py-1 rounded border border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100">
+                      <ExternalLink size={10} /> 预览
+                    </a>
+                    <a href={originalUrl} download
+                      className="flex items-center gap-1 text-[11px] px-2 py-1 rounded border border-gray-200 bg-white text-gray-600 hover:bg-gray-50">
+                      下载
+                    </a>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 连接线 */}
+        {hasOriginal && hasParsed && (
+          <div className="flex justify-center">
+            <div className="w-px h-4 bg-gray-200" />
+          </div>
+        )}
+
+        {/* ── 层 2：MinerU 解析产物 ── */}
+        {hasParsed && (
+          <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+            <button
+              onClick={handleExpandParsed}
+              className="w-full text-left flex items-center justify-between"
+            >
+              <p className="text-xs font-semibold text-gray-600 flex items-center gap-1.5">
+                <span className="w-4 h-4 rounded-full bg-orange-100 text-orange-600 text-[10px] flex items-center justify-center font-bold">2</span>
+                MinerU 解析产物
+                {parsedFilesCount && (
+                  <span className="ml-1 text-gray-400 font-normal">（{parsedFilesCount} 个文件）</span>
+                )}
+              </p>
+              {listExpanded ? <ChevronDown size={13} className="text-gray-400" /> : <ChevronRight size={13} className="text-gray-400" />}
+            </button>
+
+            {parsedAt && (
+              <p className="text-xs text-gray-500 mt-1">
+                解析时间：<span className="text-gray-700">{new Date(parsedAt).toLocaleString('zh-CN')}</span>
+              </p>
+            )}
+
+            {markdownObjectName && (
+              <p className="text-xs text-gray-400 font-mono mt-1 break-all">
+                <span className="text-gray-500 not-italic">路径：</span>{markdownObjectName.replace(/\/full\.md$/, '/')}<span className="text-orange-500">full.md</span>
+              </p>
+            )}
+
+            {listExpanded && (
+              <div className="mt-2">
+                {listLoading ? (
+                  <div className="flex items-center gap-1.5 text-xs text-gray-400 py-2">
+                    <Loader size={12} className="animate-spin" /> 加载文件列表...
+                  </div>
+                ) : parsedFiles.length === 0 ? (
+                  <p className="text-xs text-gray-400 py-1">暂无文件记录（MinIO 中可能尚未存储）</p>
+                ) : (
+                  <div className="space-y-1 max-h-52 overflow-auto">
+                    {parsedFiles.map((f) => (
+                      <div key={f.objectName} className="flex items-center justify-between text-xs py-1 border-b border-gray-100 last:border-0">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <FileText size={11} className={f.name.endsWith('.md') ? 'text-orange-400' : f.name.endsWith('.json') ? 'text-green-500' : 'text-gray-400'} />
+                          <span className="truncate text-gray-700 font-mono max-w-36" title={f.name}>{f.name}</span>
+                          <span className="text-gray-400 flex-shrink-0">{fmtSize(f.size)}</span>
+                        </div>
+                        <div className="flex items-center gap-1.5 ml-2 flex-shrink-0">
+                          {f.name.endsWith('.md') && (
+                            <button
+                              onClick={() => handlePreviewMd(f.presignedUrl)}
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-orange-50 text-orange-600 hover:bg-orange-100"
+                            >
+                              {mdLoading ? '...' : mdPreview !== null ? '收起' : '预览'}
+                            </button>
+                          )}
+                          {f.presignedUrl && (
+                            <a href={f.presignedUrl} target="_blank" rel="noreferrer"
+                              className="text-[10px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-600 hover:bg-blue-100">
+                              <ExternalLink size={9} className="inline" /> 下载
+                            </a>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Markdown 预览区 */}
+            {mdPreview !== null && (
+              <div className="mt-2">
+                <pre className="bg-white rounded border border-orange-100 p-2 text-[11px] text-gray-700 overflow-auto max-h-48 whitespace-pre-wrap leading-relaxed">
+                  {mdPreview.slice(0, 2000)}{mdPreview.length > 2000 ? '\n\n...(内容已截断)' : ''}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* 连接线 */}
+        {hasParsed && hasAi && (
+          <div className="flex justify-center">
+            <div className="w-px h-4 bg-gray-200" />
+          </div>
+        )}
+
+        {/* ── 层 3：AI 分析结果 ── */}
+        {hasAi && (
+          <div className="rounded-lg border border-gray-100 bg-gray-50 p-3">
+            <p className="text-xs font-semibold text-gray-600 mb-2 flex items-center gap-1.5">
+              <span className="w-4 h-4 rounded-full bg-purple-100 text-purple-600 text-[10px] flex items-center justify-center font-bold">3</span>
+              AI 元数据分析
+              {aiConfidence && (
+                <span className="ml-1 px-1.5 py-0.5 rounded bg-purple-50 text-purple-600 text-[10px]">置信度 {aiConfidence}%</span>
+              )}
+            </p>
+            <div className="space-y-0.5 text-xs text-gray-500">
+              {material.metadata?.subject && (
+                <p>学科：<span className="text-gray-700">{material.metadata.subject as string}</span></p>
+              )}
+              {material.metadata?.grade && (
+                <p>年级：<span className="text-gray-700">{material.metadata.grade as string}</span></p>
+              )}
+              {material.metadata?.language && (
+                <p>语言：<span className="text-gray-700">{material.metadata.language as string}</span></p>
+              )}
+              {aiAnalyzedAt && (
+                <p>分析时间：<span className="text-gray-700">{new Date(aiAnalyzedAt).toLocaleString('zh-CN')}</span></p>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── 可编辑 Select 组件 ────────────────────────────────────────
+function MetaSelect({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: string[];
+  onChange: (v: string) => void;
+}) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-400 mb-1">{label}</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-purple-300 bg-white text-gray-700"
+      >
+        <option value="">— 未识别 —</option>
+        {options.map((o) => (
+          <option key={o} value={o}>{o}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 export function AssetDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -29,6 +372,20 @@ export function AssetDetailPage() {
 
   // AI 分析状态
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
+
+  // 元数据可编辑表单（语言/年级/学科/国家/类型 + 摘要）
+  const [metaForm, setMetaForm] = useState({
+    language:    (material?.metadata?.language as string) || '',
+    grade:       (material?.metadata?.grade as string) || '',
+    subject:     (material?.metadata?.subject as string) || '',
+    country:     (material?.metadata?.country as string) || '',
+    type:        (material?.metadata?.type as string) || '',
+    summary:     (material?.metadata?.summary as string) || '',
+  });
+
+  const updateMeta = (key: keyof typeof metaForm, val: string) =>
+    setMetaForm((prev) => ({ ...prev, [key]: val }));
+
   if (!detail) {
     return (
       <div className="p-6">
@@ -47,8 +404,6 @@ export function AssetDetailPage() {
 
   const handleStartProcessing = () => {
     if (!detail) return;
-
-    // 创建一个新的处理任务
     const newTask: ProcessTask = {
       id: Date.now(),
       name: detail.title,
@@ -61,25 +416,11 @@ export function AssetDetailPage() {
       assignee: '系统',
       startTime: new Date().toLocaleString('zh-CN'),
       estimatedTime: '预计 30 分钟',
-      logs: [
-        {
-          time: new Date().toLocaleTimeString('zh-CN'),
-          level: 'info',
-          msg: '任务已创建，开始处理',
-        },
-      ],
-      materialId: numId, // 关联到当前资料
+      logs: [{ time: new Date().toLocaleTimeString('zh-CN'), level: 'info', msg: '任务已创建，开始处理' }],
+      materialId: numId,
     };
-
-    // 添加任务并更新资料状态
     dispatch({ type: 'ADD_PROCESS_TASK', payload: newTask });
-
-    // 更新资料状态为 processing
-    dispatch({
-      type: 'UPDATE_MATERIAL_AI_STATUS',
-      payload: { id: numId, aiStatus: 'analyzing', status: 'processing' },
-    });
-
+    dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: numId, aiStatus: 'analyzing', status: 'processing' } });
     toast.success('处理任务已创建，正在处理中');
   };
 
@@ -90,7 +431,6 @@ export function AssetDetailPage() {
       return;
     }
 
-    // 判断文件来源：优先用 objectName 重新获取 presigned URL，否则使用已有 URL
     const objectName = material.metadata?.objectName as string | undefined;
     const fileUrl = material.metadata?.fileUrl as string | undefined;
 
@@ -106,103 +446,76 @@ export function AssetDetailPage() {
     dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'processing' } });
 
     try {
-      let resolvedUrl = fileUrl;
-
-      // 如果有 objectName，先从 upload-server 获取最新 presigned URL（避免旧 URL 过期）
-      if (objectName) {
-        setMineruProgressMsg('获取文件访问凭证...');
-        const presignRes = await fetch(
-          `/__proxy/upload/presign?objectName=${encodeURIComponent(objectName)}`,
-        );
-        if (presignRes.ok) {
-          const presignData = await presignRes.json();
-          resolvedUrl = presignData.url;
-        }
-      }
-
-      if (!resolvedUrl) {
-        throw new Error('无法获取文件访问地址');
-      }
-
-      // 用 onProgress 回调同步更新进度和重试计数
       const handleProgress = (pct: number, msg: string) => {
         setMineruProgress(pct);
         setMineruProgressMsg(msg);
-        // 从消息中提取重试次数（格式：第 N/3 次）
         const retryMatch = msg.match(/第\s*(\d+)\s*\/\s*\d+\s*次/);
         if (retryMatch) setMineruRetryCount(Number(retryMatch[1]) - 1);
       };
 
-      const result = await runMinerUPipeline(
-        resolvedUrl,
-        `${material.title}.${material.type.toLowerCase()}`,
-        state.mineruConfig,
-        handleProgress,
-      );
+      let result: Awaited<ReturnType<typeof runMinerUPipeline>>;
+
+      if (objectName) {
+        // MinIO 存储：通过后端代理接口下载文件为 Blob，走模式 B（无需公网访问 MinIO）
+        setMineruProgressMsg('从存储下载文件...');
+        // 使用后端代理接口下载，避免浏览器直接访问 MinIO 内网地址（CORS/网络不通）
+        const proxyUrl = `/__proxy/upload/proxy-file?objectName=${encodeURIComponent(objectName)}`;
+        const blob = await fetch(proxyUrl).then((r) => {
+          if (!r.ok) throw new Error(`下载文件失败: HTTP ${r.status}`);
+          return r.blob();
+        });
+        const fileName = `${material.title}.${material.type.toLowerCase()}`;
+        const file = new File([blob], fileName, { type: blob.type || 'application/octet-stream' });
+
+        result = await runMinerUPipeline(file, state.mineruConfig, handleProgress);
+      } else {
+        // tmpfiles 等公网可访问 URL：走模式 A（URL 直接提交）
+        if (!fileUrl) throw new Error('无法获取文件访问地址');
+        result = await runMinerUPipeline(fileUrl, `${material.title}.${material.type.toLowerCase()}`, state.mineruConfig, handleProgress);
+      }
 
       if (result.zipUrl) {
         dispatch({ type: 'UPDATE_MATERIAL_MINERU_ZIP_URL', payload: { id: numId, mineruZipUrl: result.zipUrl } });
 
-        // 解析完成后，让后端下载 ZIP 并将解析物存入存储（MinIO 或 tmpfiles fallback）
-        {
-          setMineruProgressMsg('保存解析结果到文件库...');
-          try {
-            const downloadRes = await fetch('/__proxy/upload/parse/download', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ zipUrl: result.zipUrl, materialId: numId }),
-            });
+        setMineruProgressMsg('保存解析结果到文件库...');
+        try {
+          const downloadRes = await fetch('/__proxy/upload/parse/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zipUrl: result.zipUrl, materialId: numId }),
+          });
 
-            if (downloadRes.ok) {
-              const downloadData = await downloadRes.json();
-
-              // 内联 markdownContent 始终存在（服务端从 ZIP 提取），优先用于预览
-              if (downloadData.markdownContent) {
-                setMineruMarkdown(downloadData.markdownContent);
-              }
-
-              // markdownObjectName（MinIO）或 markdownUrl（tmpfiles fallback）任一存在即可
-              if (downloadData.markdownObjectName || downloadData.markdownUrl) {
-                dispatch({
-                  type: 'UPDATE_MATERIAL',
-                  payload: {
-                    id: numId,
-                    updates: {
-                      metadata: {
-                        ...material.metadata,
-                        ...(downloadData.markdownObjectName ? { markdownObjectName: downloadData.markdownObjectName } : {}),
-                        ...(downloadData.markdownUrl ? { markdownUrl: downloadData.markdownUrl } : {}),
-                        parsedFilesCount: String(downloadData.totalFiles ?? '?'),
-                      },
+          if (downloadRes.ok) {
+            const downloadData = await downloadRes.json();
+            if (downloadData.markdownContent) setMineruMarkdown(downloadData.markdownContent);
+            if (downloadData.markdownObjectName || downloadData.markdownUrl) {
+              dispatch({
+                type: 'UPDATE_MATERIAL',
+                payload: {
+                  id: numId,
+                  updates: {
+                    metadata: {
+                      ...material.metadata,
+                      ...(downloadData.markdownObjectName ? { markdownObjectName: downloadData.markdownObjectName } : {}),
+                      ...(downloadData.markdownUrl ? { markdownUrl: downloadData.markdownUrl } : {}),
+                      parsedFilesCount: String(downloadData.totalFiles ?? '?'),
+                      parsedAt: new Date().toISOString(),
                     },
                   },
-                });
-
-                // 若没有内联内容，再从 URL 拉取
-                if (!downloadData.markdownContent && downloadData.markdownUrl) {
-                  const mdRes = await fetch(downloadData.markdownUrl);
-                  if (mdRes.ok) {
-                    const mdText = await mdRes.text();
-                    setMineruMarkdown(mdText);
-                  }
-                }
+                },
+              });
+              if (!downloadData.markdownContent && downloadData.markdownUrl) {
+                const mdRes = await fetch(downloadData.markdownUrl);
+                if (mdRes.ok) setMineruMarkdown(await mdRes.text());
               }
-              console.log(`[MinerU] 解析物已保存: ${downloadData.totalFiles ?? 0} 个文件，markdownContent: ${downloadData.markdownContent?.length ?? 0} chars`);
-            } else {
-              console.warn('[MinerU] 解析物保存失败，ZIP URL 仍可下载');
             }
-          } catch (downloadErr) {
-            console.warn('[MinerU] 解析物回存 MinIO 失败:', downloadErr);
-            // 不阻断主流程，ZIP 下载链接依然可用
           }
+        } catch (downloadErr) {
+          console.warn('[MinerU] 解析物回存失败:', downloadErr);
         }
       }
 
-      dispatch({
-        type: 'UPDATE_MATERIAL_MINERU_STATUS',
-        payload: { id: numId, mineruStatus: 'completed', mineruCompletedAt: Date.now() },
-      });
-
+      dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'completed', mineruCompletedAt: Date.now() } });
       toast.success('MinerU 解析完成！');
     } catch (err) {
       const msg = err instanceof Error ? err.message : '未知错误';
@@ -218,10 +531,8 @@ export function AssetDetailPage() {
 
     let markdownObjectName = material.metadata?.markdownObjectName as string | undefined;
     let markdownUrl = material.metadata?.markdownUrl as string | undefined;
-    // mineruMarkdown 是本次会话从 parse/download 响应中内联获取的 full.md 文本
     const inlineMarkdownContent = mineruMarkdown || undefined;
 
-    // 如果还没有 markdown，但有 MinerU zipUrl，先尝试 download
     if (!markdownObjectName && !markdownUrl && !inlineMarkdownContent && material.mineruZipUrl) {
       setAiAnalyzing(true);
       try {
@@ -234,9 +545,7 @@ export function AssetDetailPage() {
           const downloadData = await downloadRes.json();
           if (downloadData.markdownObjectName) markdownObjectName = downloadData.markdownObjectName;
           if (downloadData.markdownUrl) markdownUrl = downloadData.markdownUrl;
-          if (downloadData.markdownContent) {
-            setMineruMarkdown(downloadData.markdownContent);
-          }
+          if (downloadData.markdownContent) setMineruMarkdown(downloadData.markdownContent);
           if (downloadData.markdownObjectName || downloadData.markdownUrl) {
             dispatch({
               type: 'UPDATE_MATERIAL',
@@ -259,7 +568,6 @@ export function AssetDetailPage() {
       }
     }
 
-    // 最终兜底：用内联内容（组件内存，页面刷新后失效）
     const finalInlineContent = markdownObjectName || markdownUrl
       ? undefined
       : (inlineMarkdownContent || mineruMarkdown || undefined);
@@ -271,7 +579,6 @@ export function AssetDetailPage() {
     }
 
     const { apiEndpoint, apiKey, model } = state.aiConfig;
-    console.log('[AI] config check — endpoint:', apiEndpoint, '| key:', apiKey ? apiKey.slice(0,8)+'...(len='+apiKey.length+')' : 'EMPTY', '| model:', model);
     if (!apiEndpoint?.trim() || !apiKey?.trim() || !model?.trim()) {
       toast.error('请先在「系统设置」中配置 AI API（接口地址 / Key / 模型名）');
       return;
@@ -303,7 +610,18 @@ export function AssetDetailPage() {
 
       const data = await resp.json();
 
-      // 将 AI 分析结果回写到 store
+      // AI 识别结果回写到 store 的 metadata（保留 format/pages/fileUrl 等上传字段）
+      const newMetadata = {
+        subject:      data.subject || '',
+        grade:        data.grade || '',
+        type:         data.materialType || '',
+        language:     data.language || '',
+        country:      data.country || '',
+        summary:      data.summary || '',
+        aiConfidence: String(data.confidence ?? ''),
+        aiAnalyzedAt: data.analyzedAt || new Date().toISOString(),
+      };
+
       dispatch({
         type: 'UPDATE_MATERIAL_AI_STATUS',
         payload: {
@@ -312,15 +630,18 @@ export function AssetDetailPage() {
           status: 'completed',
           ...(data.title ? { title: data.title } : {}),
           tags: data.tags?.length ? data.tags : material.tags,
-          metadata: {
-            subject: data.subject || '',
-            grade: data.grade || '',
-            type: data.materialType || '',
-            summary: data.summary || '',
-            aiConfidence: String(data.confidence ?? ''),
-            aiAnalyzedAt: data.analyzedAt || new Date().toISOString(),
-          },
+          metadata: newMetadata,
         },
+      });
+
+      // 同步更新本地表单（AI 结果自动填入）
+      setMetaForm({
+        language: data.language || '',
+        grade:    data.grade || '',
+        subject:  data.subject || '',
+        country:  data.country || '',
+        type:     data.materialType || '',
+        summary:  data.summary || '',
       });
 
       toast.success(
@@ -337,6 +658,24 @@ export function AssetDetailPage() {
     }
   };
 
+  /** 保存元数据表单到 store（合并到 material.metadata） */
+  const handleSaveMeta = () => {
+    if (!material) return;
+    dispatch({
+      type: 'UPDATE_MATERIAL',
+      payload: {
+        id: numId,
+        updates: {
+          metadata: {
+            ...material.metadata,
+            ...metaForm,
+          },
+        },
+      },
+    });
+    toast.success('元数据已保存');
+  };
+
   const handleSaveTags = () => {
     dispatch({ type: 'UPDATE_ASSET_TAGS', payload: { id: numId, tags: localTags } });
     setEditingTags(false);
@@ -345,13 +684,19 @@ export function AssetDetailPage() {
 
   const addTag = () => {
     const t = tagInput.trim();
-    if (t && !localTags.includes(t)) {
-      setLocalTags((prev) => [...prev, t]);
-    }
+    if (t && !localTags.includes(t)) setLocalTags((prev) => [...prev, t]);
     setTagInput('');
   };
 
   const removeTag = (tag: string) => setLocalTags((prev) => prev.filter((t) => t !== tag));
+
+  // 右侧元数据卡片展示字段（上传自动填入 + AI 识别）
+  const displayMeta: Record<string, string> = {};
+  const META_DISPLAY_ORDER = ['language', 'grade', 'subject', 'country', 'type', 'format', 'size', 'pages', 'aiConfidence'];
+  for (const key of META_DISPLAY_ORDER) {
+    const val = material?.metadata?.[key];
+    if (val != null && val !== '') displayMeta[key] = String(val);
+  }
 
   return (
     <div className="p-6 space-y-5">
@@ -370,14 +715,12 @@ export function AssetDetailPage() {
           </div>
           <div className="flex items-center gap-2">
             <StatusBadge status={detail.status} />
-            {/* 当资料状态为 pending 时，显示「开始处理」按钮 */}
             {detail.status === 'pending' && (
               <button
                 onClick={handleStartProcessing}
                 className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-orange-50 text-orange-700 border border-orange-200 rounded-lg hover:bg-orange-100"
               >
-                <Play size={12} />
-                开始处理
+                <Play size={12} /> 开始处理
               </button>
             )}
           </div>
@@ -387,14 +730,14 @@ export function AssetDetailPage() {
       <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
         {/* 左主列 */}
         <div className="lg:col-span-2 space-y-5">
-        {/* MinerU 解析面板 */}
+
+          {/* MinerU 解析面板 */}
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <div className="flex items-center justify-between mb-4">
               <h2 className="font-semibold text-gray-800 flex items-center gap-2">
                 <Cpu size={16} className="text-orange-500" /> MinerU 解析
               </h2>
               <div className="flex items-center gap-3">
-                {/* 状态指示 */}
                 {material?.mineruStatus === 'completed' && (
                   <span className="flex items-center gap-1 text-xs text-green-600">
                     <CheckCircle size={13} /> 解析完成
@@ -454,6 +797,9 @@ export function AssetDetailPage() {
                     <span className="ml-2 px-1.5 py-0.5 bg-gray-100 rounded text-gray-500">
                       {String(material.metadata.provider) === 'minio' ? 'MinIO' : 'tmpfiles'}
                     </span>
+                  )}
+                  {material?.metadata?.pages && (
+                    <span className="ml-2 text-gray-400">{material.metadata.pages} 页</span>
                   )}
                 </p>
               ) : (
@@ -531,52 +877,120 @@ export function AssetDetailPage() {
               </div>
             </div>
 
-            {/* AI 分析结果展示 */}
-            {material?.aiStatus === 'analyzed' && (
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
-                {material.metadata?.subject && (
-                  <div><dt className="text-gray-400">学科</dt><dd className="font-medium text-gray-700">{material.metadata.subject}</dd></div>
-                )}
-                {material.metadata?.grade && (
-                  <div><dt className="text-gray-400">年级</dt><dd className="font-medium text-gray-700">{material.metadata.grade}</dd></div>
-                )}
-                {material.metadata?.type && (
-                  <div><dt className="text-gray-400">资料类型</dt><dd className="font-medium text-gray-700">{material.metadata.type}</dd></div>
-                )}
-                {material.metadata?.aiConfidence && (
-                  <div><dt className="text-gray-400">置信度</dt><dd className="font-medium text-gray-700">{material.metadata.aiConfidence}%</dd></div>
-                )}
-                {material.metadata?.summary && (
-                  <div className="col-span-2 mt-1">
-                    <dt className="text-gray-400 mb-0.5">内容摘要</dt>
-                    <dd className="text-gray-600 leading-relaxed">{material.metadata.summary}</dd>
+            {/* 元数据可编辑表单（AI 分析完成后自动填充，用户随时可修改） */}
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <MetaSelect
+                  label="语言"
+                  value={metaForm.language}
+                  options={LANGUAGE_OPTIONS}
+                  onChange={(v) => updateMeta('language', v)}
+                />
+                <MetaSelect
+                  label="年级"
+                  value={metaForm.grade}
+                  options={GRADE_OPTIONS}
+                  onChange={(v) => updateMeta('grade', v)}
+                />
+                <MetaSelect
+                  label="学科"
+                  value={metaForm.subject}
+                  options={SUBJECT_OPTIONS}
+                  onChange={(v) => updateMeta('subject', v)}
+                />
+                <MetaSelect
+                  label="国家/地区"
+                  value={metaForm.country}
+                  options={COUNTRY_OPTIONS}
+                  onChange={(v) => updateMeta('country', v)}
+                />
+                <MetaSelect
+                  label="资料类型"
+                  value={metaForm.type}
+                  options={MATERIAL_TYPE_OPTIONS}
+                  onChange={(v) => updateMeta('type', v)}
+                />
+                {/* 只读字段：格式（上传时自动填入） */}
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">格式</label>
+                  <div className="text-xs text-gray-500 px-2 py-1.5 bg-gray-50 rounded-lg border border-gray-200">
+                    {(material?.metadata?.format as string) || '—'}
                   </div>
-                )}
-              </dl>
-            )}
-            {!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && !material?.mineruZipUrl && (
-              <p className="text-xs text-yellow-600">⚠ 请先完成 MinerU 解析，AI 分析将基于解析出的 Markdown 内容</p>
-            )}
-          </div>
+                </div>
+              </div>
 
+              {/* 只读字段行：文件大小 + 页数 */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">文件大小</label>
+                  <div className="text-xs text-gray-500 px-2 py-1.5 bg-gray-50 rounded-lg border border-gray-200">
+                    {material?.size || '—'}
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-400 mb-1">页数</label>
+                  <div className="text-xs text-gray-500 px-2 py-1.5 bg-gray-50 rounded-lg border border-gray-200">
+                    {(material?.metadata?.pages as string) || '—'}
+                  </div>
+                </div>
+              </div>
+
+              {/* 摘要（多行文本） */}
+              <div>
+                <label className="block text-xs text-gray-400 mb-1">内容摘要</label>
+                <textarea
+                  value={metaForm.summary}
+                  onChange={(e) => updateMeta('summary', e.target.value)}
+                  rows={3}
+                  placeholder="AI 分析后自动填入，或手动输入摘要..."
+                  className="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-purple-300 resize-none text-gray-700 placeholder:text-gray-300"
+                />
+              </div>
+            </div>
+
+            {/* 保存按钮 */}
+            <div className="flex items-center justify-between mt-4 pt-3 border-t border-gray-100">
+              {!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && !material?.mineruZipUrl && (
+                <p className="text-xs text-yellow-600">⚠ 请先完成 MinerU 解析，AI 分析将基于解析出的 Markdown 内容</p>
+              )}
+              <div className="ml-auto">
+                <button
+                  onClick={handleSaveMeta}
+                  className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors"
+                >
+                  <Save size={12} /> 保存元数据
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* 右侧列 */}
         <div className="space-y-5">
-          {/* 元数据 */}
+          {/* 文件溯源卡片 */}
+          {material && <FileLineageCard material={material} />}
+
+          {/* 元数据概览（上传自动填入 + AI 识别已保存值） */}
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <h2 className="font-semibold text-gray-800 mb-4">元数据</h2>
-            <dl className="space-y-2">
-              {Object.entries(detail.metadata).filter(([, v]) => v != null && v !== '').map(([k, v]) => (
-                <div key={k} className="flex justify-between text-sm">
-                  <dt className="text-gray-500 capitalize">{k}</dt>
-                  <dd className="text-gray-800 font-medium text-right max-w-32 truncate">{String(v)}</dd>
-                </div>
-              ))}
-              {Object.entries(detail.metadata).filter(([, v]) => v == null || v === '').length === Object.entries(detail.metadata).length && (
-                <div className="text-center py-2 text-gray-400 text-sm">暂无元数据</div>
-              )}
-            </dl>
+            {Object.keys(displayMeta).length > 0 ? (
+              <dl className="space-y-2">
+                {Object.entries(displayMeta).map(([k, v]) => (
+                  <div key={k} className="flex justify-between text-sm">
+                    <dt className="text-gray-500">{META_LABELS[k] ?? k}</dt>
+                    <dd className="text-gray-800 font-medium text-right max-w-32 truncate">{v}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <div className="text-center py-2 text-gray-400 text-sm">暂无元数据</div>
+            )}
+            {material?.metadata?.summary && (
+              <div className="mt-3 pt-3 border-t border-gray-100">
+                <p className="text-xs text-gray-400 mb-1">摘要</p>
+                <p className="text-xs text-gray-600 leading-relaxed">{material.metadata.summary as string}</p>
+              </div>
+            )}
           </div>
 
           {/* 标签 */}

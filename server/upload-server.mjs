@@ -3,27 +3,32 @@
  *
  * 端口：8788（通过 UPLOAD_PORT 环境变量覆盖）
  *
- * 存储后端（通过 STORAGE_BACKEND 环境变量切换）：
+ * 存储后端（通过 STORAGE_BACKEND 环境变量切换，可在运行时通过 /settings/storage 接口更新）：
  *   minio    — MinIO 私有对象存储（默认），返回预签名 URL
  *   tmpfiles — tmpfiles.org 公开临时存储（降级 fallback）
  *
  * 路由总览：
- *   GET    /health                  → 健康检查
- *   POST   /upload                  → 上传单文件，返回 { url, fileName, size, mimeType, provider }
- *   POST   /upload-multiple         → 上传多文件（最多 20 个），返回 results[]
- *   GET    /parse/status/:taskId    → 查询 MinerU 解析任务状态
- *   POST   /parse/download          → 下载 MinerU 解析结果（ZIP）并转存到 MinIO
- *   POST   /parse/analyze           → 解析已上传文件（MinerU OCR + MD 提取）
+ *   GET    /health                      → 健康检查
+ *   POST   /upload                      → 上传单文件，返回 { url, fileName, size, mimeType, provider, pages, format }
+ *   POST   /upload-multiple             → 上传多文件（最多 20 个），返回 results[]
+ *   GET    /parse/status/:taskId        → 查询 MinerU 解析任务状态
+ *   POST   /parse/download              → 下载 MinerU 解析结果（ZIP）并转存到 MinIO
+ *   POST   /parse/analyze               → 解析已上传文件（MinerU OCR + MD 提取）
+ *   GET    /settings/storage            → 读取当前 MinIO 配置（密钥脱敏）
+ *   PUT    /settings/storage            → 更新运行时 MinIO 配置并持久化到 db-server
+ *   POST   /settings/storage/test       → 测试 MinIO 连接（bucketExists）
  *
  * 环境变量（详见 .env.example）：
- *   UPLOAD_PORT          — 服务端口（默认 8788）
- *   STORAGE_BACKEND      — 存储后端（minio | tmpfiles，默认 tmpfiles）
- *   MINIO_ENDPOINT       — MinIO 端点（默认 minio）
- *   MINIO_PORT           — MinIO API 端口（默认 9000）
- *   MINIO_ACCESS_KEY     — MinIO 访问密钥
- *   MINIO_SECRET_KEY     — MinIO 私钥
- *   MINIO_BUCKET         — 存储桶名称（默认 eduassets）
- *   MINIO_PRESIGNED_EXPIRY — 预签名 URL 有效期秒数（默认 3600）
+ *   UPLOAD_PORT              — 服务端口（默认 8788）
+ *   STORAGE_BACKEND          — 存储后端（minio | tmpfiles，默认 tmpfiles）
+ *   MINIO_ENDPOINT           — MinIO 端点（默认 minio）
+ *   MINIO_PORT               — MinIO API 端口（默认 9000）
+ *   MINIO_ACCESS_KEY         — MinIO 访问密钥
+ *   MINIO_SECRET_KEY         — MinIO 私钥
+ *   MINIO_BUCKET             — 原始资料存储桶名称（默认 eduassets）
+ *   MINIO_PARSED_BUCKET      — MinerU 解析产物存储桶名称（默认 eduassets-parsed）
+ *   MINIO_PRESIGNED_EXPIRY   — 预签名 URL 有效期秒数（默认 3600）
+ *   DB_BASE_URL              — db-server 地址（默认 http://localhost:8789）
  */
 
 import express from 'express';
@@ -31,28 +36,48 @@ import cors from 'cors';
 import multer from 'multer';
 import { Client } from 'minio';
 import JSZip from 'jszip';
+import { PDFDocument } from 'pdf-lib';
 
 const app = express();
 const port = Number(process.env.UPLOAD_PORT || 8788);
 
+// db-server 地址（用于持久化 MinIO 配置）
+const DB_BASE_URL = process.env.DB_BASE_URL || 'http://localhost:8789';
+
 app.use(cors());
 app.use(express.json());
 
-// ─── 存储后端配置 ──────────────────────────────────────────────
-const STORAGE_BACKEND = process.env.STORAGE_BACKEND || 'tmpfiles';
+// ─── MinIO 动态配置（可在运行时通过 /settings/storage 接口更新）─
+let minioState = {
+  storageBackend: process.env.STORAGE_BACKEND || 'tmpfiles',
+  endpoint:       process.env.MINIO_ENDPOINT || 'minio',
+  port:           Number(process.env.MINIO_PORT || 9000),
+  useSSL:         process.env.MINIO_USE_SSL === 'true',
+  accessKey:      process.env.MINIO_ACCESS_KEY || 'minioadmin',
+  secretKey:      process.env.MINIO_SECRET_KEY || 'minioadmin',
+  bucket:         process.env.MINIO_BUCKET || 'eduassets',
+  parsedBucket:   process.env.MINIO_PARSED_BUCKET || 'eduassets-parsed',
+  presignedExpiry: Number(process.env.MINIO_PRESIGNED_EXPIRY || 3600),
+};
 
-// ─── MinIO 配置 ────────────────────────────────────────────────
-const minioClient = new Client({
-  endPoint: process.env.MINIO_ENDPOINT || 'minio',
-  port: Number(process.env.MINIO_PORT || 9000),
-  useSSL: process.env.MINIO_USE_SSL === 'true',
-  accessKey: process.env.MINIO_ACCESS_KEY || 'minioadmin',
-  secretKey: process.env.MINIO_SECRET_KEY || 'minioadmin',
-});
-const MINIO_BUCKET = process.env.MINIO_BUCKET || 'eduassets';
+/** 根据 minioState 创建 MinIO Client */
+function createMinioClient(state = minioState) {
+  return new Client({
+    endPoint:  state.endpoint,
+    port:      state.port,
+    useSSL:    state.useSSL,
+    accessKey: state.accessKey,
+    secretKey: state.secretKey,
+  });
+}
 
-// Presigned URL 有效期（秒），默认 1 小时
-const PRESIGNED_EXPIRY = Number(process.env.MINIO_PRESIGNED_EXPIRY || 3600);
+let minioClient = createMinioClient();
+
+function getMinioClient()  { return minioClient; }
+function getMinioBucket()  { return minioState.bucket; }
+function getParsedBucket() { return minioState.parsedBucket || minioState.bucket; }
+function getPresignedExpiry() { return minioState.presignedExpiry; }
+function getStorageBackend() { return minioState.storageBackend; }
 
 // ─── multer（仅内存存储，限 200MB）────────────────────────────
 const upload = multer({
@@ -79,39 +104,87 @@ function normalizeFileName(name) {
   return normalized || `upload_${Date.now()}.bin`;
 }
 
+/**
+ * 从文件 buffer 计算页数
+ * - PDF：使用 pdf-lib 解析
+ * - 图片：返回 1
+ * - 其他：返回 null
+ */
+async function calcPages(buffer, mimeType) {
+  try {
+    if (mimeType === 'application/pdf') {
+      const pdf = await PDFDocument.load(buffer, { ignoreEncryption: true });
+      return pdf.getPageCount();
+    }
+    if (mimeType && mimeType.startsWith('image/')) {
+      return 1;
+    }
+    return null;
+  } catch (e) {
+    console.warn('[upload-server] calcPages failed:', e.message);
+    return null;
+  }
+}
+
+/**
+ * 从 MIME 类型或文件名推断格式标签
+ */
+function detectFormat(mimeType, fileName) {
+  const ext = (fileName || '').split('.').pop()?.toLowerCase() || '';
+  const mime = (mimeType || '').toLowerCase();
+
+  if (mime === 'application/pdf' || ext === 'pdf') return 'PDF';
+  if (mime === 'image/jpeg' || ext === 'jpg' || ext === 'jpeg') return 'JPG';
+  if (mime === 'image/png' || ext === 'png') return 'PNG';
+  if (mime === 'application/msword' || ext === 'doc') return 'DOC';
+  if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || ext === 'docx') return 'DOCX';
+  if (mime === 'application/vnd.ms-powerpoint' || ext === 'ppt') return 'PPT';
+  if (mime === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' || ext === 'pptx') return 'PPTX';
+  if (ext) return ext.toUpperCase();
+  return '未知';
+}
+
 /** 确保 MinIO Bucket 存在 */
-async function ensureBucket() {
-  const exists = await minioClient.bucketExists(MINIO_BUCKET);
+async function ensureBucket(client = minioClient, bucket = getMinioBucket()) {
+  const exists = await client.bucketExists(bucket);
   if (!exists) {
-    await minioClient.makeBucket(MINIO_BUCKET, 'us-east-1');
-    console.log(`[upload-server] Bucket "${MINIO_BUCKET}" created`);
+    await client.makeBucket(bucket, 'us-east-1');
+    console.log(`[upload-server] Bucket "${bucket}" created`);
   }
 }
 
 /**
  * 上传 buffer 到 MinIO
+ * @param {string} [materialId] - 可选，传入时在 prefix 下创建以 materialId 命名的子目录（提升溯源能力）
  * @returns {{ objectName: string, presignedUrl: string }}
  */
-async function uploadBufferToMinIO(buffer, mimeType, prefix, fileName, retries = 3) {
+async function uploadBufferToMinIO(buffer, mimeType, prefix, fileName, retries = 3, materialId = '') {
   let lastError = null;
+
+  // 净化 materialId，防止路径注入
+  const safeId = materialId ? String(materialId).replace(/[^a-zA-Z0-9_-]/g, '') : '';
 
   for (let i = 1; i <= retries; i++) {
     try {
-      await ensureBucket();
+      const client = getMinioClient();
+      const bucket = getMinioBucket();
+      await ensureBucket(client, bucket);
 
-      const objectName = `${prefix}/${Date.now()}-${fileName}`;
-      await minioClient.putObject(
-        MINIO_BUCKET,
+      const objectName = safeId
+        ? `${prefix}/${safeId}/${Date.now()}-${fileName}`
+        : `${prefix}/${Date.now()}-${fileName}`;
+      await client.putObject(
+        bucket,
         objectName,
         buffer,
         buffer.length,
         { 'Content-Type': mimeType || 'application/octet-stream' },
       );
 
-      const presignedUrl = await minioClient.presignedGetObject(
-        MINIO_BUCKET,
+      const presignedUrl = await client.presignedGetObject(
+        bucket,
         objectName,
-        PRESIGNED_EXPIRY,
+        getPresignedExpiry(),
       );
 
       console.log(`[upload-server] MinIO put: ${objectName}`);
@@ -172,7 +245,7 @@ async function uploadToTmpfiles(buffer, mimeType, fileName, retries = 3) {
 
 // ─── 接口：POST /upload ────────────────────────────────────────
 // 上传原始文件（PDF / 图片等）到 MinIO originals/ 目录
-// 响应：{ url, objectName, fileName, size, mimeType, provider }
+// 响应：{ url, objectName, fileName, size, mimeType, provider, pages, format }
 app.post('/upload', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
@@ -181,20 +254,32 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     }
 
     const safeFileName = normalizeFileName(req.file.originalname);
+
+    // 并行计算 pages 和 format（不阻塞上传流程）
+    const [pages, format] = await Promise.all([
+      calcPages(req.file.buffer, req.file.mimetype),
+      Promise.resolve(detectFormat(req.file.mimetype, req.file.originalname)),
+    ]);
+
     let result;
 
-    if (STORAGE_BACKEND === 'minio') {
+    // materialId 通过 multipart body 字段传入（可选），用于构造分层目录
+    const materialId = req.body?.materialId || '';
+
+    if (getStorageBackend() === 'minio') {
       try {
         const { objectName, presignedUrl } = await uploadBufferToMinIO(
           req.file.buffer,
           req.file.mimetype,
           'originals',
           safeFileName,
+          3,
+          materialId,
         );
         result = {
           provider: 'minio',
-          url: presignedUrl,       // 用于 MinerU 直接下载（presigned，有效期1h）
-          objectName,              // 用于内部持久引用
+          url: presignedUrl,
+          objectName,
         };
       } catch (minioError) {
         console.error('[upload-server] MinIO failed, fallback to tmpfiles:', minioError.message);
@@ -213,6 +298,8 @@ app.post('/upload', upload.single('file'), async (req, res) => {
       size: req.file.size,
       mimeType: req.file.mimetype,
       provider: result.provider,
+      pages,
+      format,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -232,11 +319,56 @@ app.get('/presign', async (req, res) => {
   }
 
   try {
-    const url = await minioClient.presignedGetObject(MINIO_BUCKET, objectName, PRESIGNED_EXPIRY);
-    res.json({ url, objectName, expiresIn: PRESIGNED_EXPIRY });
+    const url = await getMinioClient().presignedGetObject(getMinioBucket(), objectName, getPresignedExpiry());
+    res.json({ url, objectName, expiresIn: getPresignedExpiry() });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[upload-server] /presign failed:', message);
+    res.status(500).json({ error: message });
+  }
+});
+
+// ─── 接口：POST /parse/oss-put ────────────────────────────────
+// 服务端代理：把浏览器传来的文件 buffer PUT 到 MinerU 返回的阿里云 OSS 预签名 URL
+// 解决浏览器直接 PUT OSS 时的 CORS / 网络访问问题
+// Body (multipart): file=<binary>, ossUrl=<string>
+// Response: { ok: true }
+app.post('/parse/oss-put', upload.single('file'), async (req, res) => {
+  const ossUrl = req.body?.ossUrl || req.query?.ossUrl;
+  if (!ossUrl) {
+    res.status(400).json({ error: '缺少 ossUrl 参数' });
+    return;
+  }
+  if (!req.file) {
+    res.status(400).json({ error: '缺少文件字段 file' });
+    return;
+  }
+
+  try {
+    console.log(`[upload-server] OSS PUT proxy → ${ossUrl.slice(0, 80)}… (${req.file.size} bytes)`);
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120_000);
+
+    // 注意：阿里云 OSS 预签名 URL 签名时未包含 Content-Type/Content-Length，
+    // 额外传这些 header 会导致 SignatureDoesNotMatch (403)，所以只发送裸 body
+    const putRes = await fetch(ossUrl, {
+      method: 'PUT',
+      body: req.file.buffer,
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+
+    if (!putRes.ok) {
+      const text = await putRes.text();
+      throw new Error(`OSS PUT 失败: HTTP ${putRes.status} — ${text.slice(0, 300)}`);
+    }
+
+    console.log(`[upload-server] OSS PUT success: HTTP ${putRes.status}`);
+    res.json({ ok: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[upload-server] /parse/oss-put failed:', message);
     res.status(500).json({ error: message });
   }
 });
@@ -275,12 +407,12 @@ app.post('/parse/download', async (req, res) => {
     const uploadedFiles = [];
     let markdownObjectName = null;
     let markdownUrl = null;
-    let markdownContent = null; // 始终内联返回 full.md 文本，作为存储不可用时的兜底
+    let markdownContent = null;
 
-    // 先尝试 MinIO；若 MinIO 不可用则跳过（仍会内联返回 markdownContent）
+    // 先尝试 MinIO；若 MinIO 不可用则跳过
     let minioAvailable = true;
     try {
-      await ensureBucket();
+      await ensureBucket(minioClient, getParsedBucket());
     } catch (bucketErr) {
       minioAvailable = false;
       console.warn('[upload-server] MinIO unavailable, will inline markdownContent as fallback:', bucketErr.message);
@@ -291,17 +423,18 @@ app.post('/parse/download', async (req, res) => {
 
       const lower = name.toLowerCase();
       const isMd = lower.endsWith('.md');
+      const isJson = lower.endsWith('.json');
       const isImage = /\.(png|jpg|jpeg|gif|webp|svg)$/.test(lower);
 
-      if (!isMd && !isImage) continue;
+      if (!isMd && !isJson && !isImage) continue;
 
       const content = await zipEntry.async('nodebuffer');
       const mimeType = isMd ? 'text/markdown'
+        : isJson ? 'application/json'
         : lower.endsWith('.png') ? 'image/png'
         : lower.endsWith('.svg') ? 'image/svg+xml'
         : 'image/jpeg';
 
-      // 捕获 full.md 文本内容（无论存储是否成功都会返回）
       if (isMd && (name === 'full.md' || name.endsWith('/full.md')) && markdownContent === null) {
         markdownContent = content.toString('utf-8');
         console.log(`[upload-server] Captured full.md inline (${markdownContent.length} chars)`);
@@ -309,22 +442,23 @@ app.post('/parse/download', async (req, res) => {
 
       if (minioAvailable) {
         try {
+          const client = getMinioClient();
+          const bucket = getParsedBucket();
           const objectName = `${prefix}/${name}`;
-          await minioClient.putObject(MINIO_BUCKET, objectName, content, content.length, { 'Content-Type': mimeType });
-          const presignedUrl = await minioClient.presignedGetObject(MINIO_BUCKET, objectName, PRESIGNED_EXPIRY);
+          await client.putObject(bucket, objectName, content, content.length, { 'Content-Type': mimeType });
+          const presignedUrl = await client.presignedGetObject(bucket, objectName, getPresignedExpiry());
           uploadedFiles.push({ objectName, presignedUrl, name });
           if (isMd && (name === 'full.md' || name.endsWith('/full.md'))) {
             markdownObjectName = objectName;
             markdownUrl = presignedUrl;
           }
-          console.log(`[upload-server] Stored to MinIO: ${objectName}`);
+          console.log(`[upload-server] Stored to MinIO (${bucket}): ${objectName}`);
         } catch (minioErr) {
           console.warn(`[upload-server] MinIO put failed for ${name}:`, minioErr.message);
           minioAvailable = false;
         }
       }
 
-      // MinIO fallback：仅将 full.md 上传到 tmpfiles（用 .txt 后缀，tmpfiles 不接受 .md）
       if (!minioAvailable && isMd && (name === 'full.md' || name.endsWith('/full.md')) && !markdownUrl) {
         try {
           const tmpResult = await uploadToTmpfiles(content, 'text/plain', 'full.txt');
@@ -341,7 +475,7 @@ app.post('/parse/download', async (req, res) => {
       files: uploadedFiles,
       markdownObjectName,
       markdownUrl,
-      markdownContent, // 内联 full.md 文本，MinIO/tmpfiles 不可用时前端直接使用
+      markdownContent,
       totalFiles: uploadedFiles.length,
     });
   } catch (error) {
@@ -353,14 +487,13 @@ app.post('/parse/download', async (req, res) => {
 
 // ─── 接口：POST /parse/analyze ────────────────────────────────
 // 读取 MinIO 中的 full.md，调用大模型 API，提取结构化元数据
-// Body: { markdownObjectName?: string, markdownUrl?: string, materialId: string|number,
-//         aiApiEndpoint: string, aiApiKey: string, aiModel: string, prompts?: object }
-// 响应: { title, subject, grade, materialType, tags, summary, confidence }
+// Body: { markdownObjectName?, markdownUrl?, markdownContent?, materialId, aiApiEndpoint, aiApiKey, aiModel, prompts? }
+// 响应: { title, subject, grade, materialType, language, country, tags, summary, confidence }
 app.post('/parse/analyze', async (req, res) => {
   const {
     markdownObjectName,
     markdownUrl,
-    markdownContent,  // 直接内联传递的 full.md 文本（优先级最高）
+    markdownContent,
     materialId,
     aiApiEndpoint,
     aiApiKey,
@@ -368,7 +501,6 @@ app.post('/parse/analyze', async (req, res) => {
     prompts,
   } = req.body;
 
-  // trim 防止前后空格导致鉴权失败
   const trimmedKey = (aiApiKey || '').trim();
   const trimmedEndpoint = (aiApiEndpoint || '').trim();
   const trimmedModel = (aiModel || '').trim();
@@ -386,27 +518,24 @@ app.post('/parse/analyze', async (req, res) => {
     // ── 1. 读取 Markdown 内容 ──────────────────────────────────
     let markdownText = '';
 
-    // 优先：直接使用内联传递的文本（无需网络请求）
     if (markdownContent && typeof markdownContent === 'string' && markdownContent.trim()) {
       markdownText = markdownContent;
       console.log(`[upload-server] Using inline markdownContent (${markdownText.length} chars)`);
     }
 
     if (!markdownText && markdownObjectName) {
-      // 从 MinIO 读取
       try {
-        const stream = await minioClient.getObject(MINIO_BUCKET, markdownObjectName);
+        const stream = await getMinioClient().getObject(getParsedBucket(), markdownObjectName);
         const chunks = [];
         for await (const chunk of stream) chunks.push(chunk);
         markdownText = Buffer.concat(chunks).toString('utf-8');
-        console.log(`[upload-server] Read markdown from MinIO: ${markdownObjectName} (${markdownText.length} chars)`);
+        console.log(`[upload-server] Read markdown from MinIO (${getParsedBucket()}): ${markdownObjectName} (${markdownText.length} chars)`);
       } catch (minioErr) {
         console.warn('[upload-server] MinIO read failed, fallback to markdownUrl:', minioErr.message);
       }
     }
 
     if (!markdownText && markdownUrl) {
-      // 兜底：直接下载 presigned URL
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 30_000);
       const mdResp = await fetch(markdownUrl, { signal: controller.signal });
@@ -422,17 +551,18 @@ app.post('/parse/analyze', async (req, res) => {
       return;
     }
 
-    // 截断：大模型上下文限制，取前 8000 字符（~4000 token），足够提取元数据
     const mdSnippet = markdownText.slice(0, 8000);
 
     // ── 2. 构建 Prompt ─────────────────────────────────────────
     const defaultPrompts = {
       title: '根据内容识别资料的准确名称/标题',
-      subject: '识别学科（数学/语文/英语/物理/化学/生物/历史/地理/政治/科学/综合等）',
-      grade: '识别适用年级（小学一年级~六年级，初中七年级~九年级，高中一年级~三年级，或"通用"）',
-      materialType: '识别资料类型（教材/试卷/讲义/课件/习题/答案/大纲/教案/其他）',
+      subject: '识别学科（数学/语文/英语/物理/化学/生物/历史/地理/政治/科学/综合/其他）',
+      grade: '识别适用年级，返回 G1~G12（G1=小学一年级，G7=初中一年级，G10=高中一年级），或"通用"',
+      materialType: '识别资料类型（课本/讲义/练习册/试卷/答案/教案/课件/大纲/其他）',
       tags: '提取3-8个关键标签，用于检索和分类（返回数组）',
       summary: '用2-3句话简要概括资料核心内容',
+      language: '识别资料使用的语言（中文/英文/双语/其他）',
+      country: '根据课程体系和内容判断适用国家/地区（中国/英国/美国/新加坡/澳大利亚/加拿大/其他）',
     };
 
     const p = { ...defaultPrompts, ...(prompts || {}) };
@@ -452,6 +582,8 @@ ${mdSnippet}
   "subject": "${p.subject}",
   "grade": "${p.grade}",
   "materialType": "${p.materialType}",
+  "language": "${p.language}",
+  "country": "${p.country}",
   "tags": ["${p.tags}"],
   "summary": "${p.summary}",
   "confidence": 0-100（整体识别置信度）
@@ -463,17 +595,15 @@ ${mdSnippet}
 3. 仅返回 JSON，不要有任何前缀或解释文字`;
 
     // ── 3. 调用大模型 API ──────────────────────────────────────
-    console.log(`[upload-server] Calling AI API: ${trimmedEndpoint} model=${trimmedModel} key=${trimmedKey ? trimmedKey.slice(0,8)+'...(len='+trimmedKey.length+')' : 'EMPTY'}`);
+    console.log(`[upload-server] Calling AI API: ${trimmedEndpoint} model=${trimmedModel}`);
 
     const aiController = new AbortController();
     const aiTimer = setTimeout(() => aiController.abort(), 120_000);
 
-    // trimmedEndpoint 由前端传入，可能是完整 URL（含 /chat/completions）或 base URL
-    // 兼容两种情况：若末尾已含 /chat/completions 则直接用，否则追加
     const aiFullUrl = /\/chat\/completions\/?$/.test(trimmedEndpoint)
       ? trimmedEndpoint
       : `${trimmedEndpoint.replace(/\/$/, '')}/chat/completions`;
-    console.log(`[upload-server] AI full URL: ${aiFullUrl}`);
+
     const aiResp = await fetch(aiFullUrl, {
       method: 'POST',
       headers: {
@@ -505,7 +635,6 @@ ${mdSnippet}
     // ── 4. 解析 AI 返回的 JSON ─────────────────────────────────
     let extracted;
     try {
-      // 有些模型会在 JSON 外面包裹 markdown 代码块
       const jsonStr = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
       extracted = JSON.parse(jsonStr);
     } catch {
@@ -513,23 +642,22 @@ ${mdSnippet}
       throw new Error(`AI 返回格式异常，无法解析为 JSON。原始响应：${rawContent.slice(0, 200)}`);
     }
 
-    // 归一化字段
     const result = {
-      title: String(extracted.title || '').trim(),
-      subject: String(extracted.subject || '').trim(),
-      grade: String(extracted.grade || '').trim(),
+      title:        String(extracted.title || '').trim(),
+      subject:      String(extracted.subject || '').trim(),
+      grade:        String(extracted.grade || '').trim(),
       materialType: String(extracted.materialType || extracted.type || '').trim(),
-      tags: Array.isArray(extracted.tags) ? extracted.tags.map(String).filter(Boolean) : [],
-      summary: String(extracted.summary || '').trim(),
-      confidence: Math.min(100, Math.max(0, Number(extracted.confidence) || 0)),
+      language:     String(extracted.language || '').trim(),
+      country:      String(extracted.country || '').trim(),
+      tags:         Array.isArray(extracted.tags) ? extracted.tags.map(String).filter(Boolean) : [],
+      summary:      String(extracted.summary || '').trim(),
+      confidence:   Math.min(100, Math.max(0, Number(extracted.confidence) || 0)),
       materialId,
-      analyzedAt: new Date().toISOString(),
+      analyzedAt:   new Date().toISOString(),
     };
 
     console.log(`[upload-server] AI analysis done for material ${materialId}:`, {
-      subject: result.subject,
-      grade: result.grade,
-      confidence: result.confidence,
+      subject: result.subject, grade: result.grade, language: result.language, confidence: result.confidence,
     });
 
     res.json(result);
@@ -540,9 +668,50 @@ ${mdSnippet}
   }
 });
 
+// ─── 接口：GET /proxy-file ─────────────────────────────────────
+// 服务端代理：从 MinIO 流式读取文件并回传给浏览器，解决浏览器直接访问 MinIO presigned URL 的 CORS/网络问题
+// Query: ?objectName=originals/xxx.pdf[&bucket=eduassets]
+// Response: 原始文件二进制流
+app.get('/proxy-file', async (req, res) => {
+  const { objectName, bucket: bucketParam } = req.query;
+  if (!objectName || typeof objectName !== 'string') {
+    res.status(400).json({ error: '缺少 objectName 参数' });
+    return;
+  }
+
+  const bucket = (bucketParam && typeof bucketParam === 'string') ? bucketParam : getMinioBucket();
+
+  try {
+    console.log(`[upload-server] proxy-file: ${bucket}/${objectName}`);
+    const client = getMinioClient();
+
+    // 获取对象 stat 以设置 Content-Type 和 Content-Length
+    let stat;
+    try {
+      stat = await client.statObject(bucket, objectName);
+    } catch {
+      stat = null;
+    }
+
+    const contentType = stat?.metaData?.['content-type'] || 'application/octet-stream';
+    res.setHeader('Content-Type', contentType);
+    if (stat?.size) res.setHeader('Content-Length', String(stat.size));
+    res.setHeader('Cache-Control', 'private, max-age=300');
+
+    const stream = await client.getObject(bucket, objectName);
+    stream.on('error', (err) => {
+      console.error('[upload-server] proxy-file stream error:', err.message);
+      if (!res.headersSent) res.status(500).json({ error: err.message });
+    });
+    stream.pipe(res);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[upload-server] /proxy-file failed:', message);
+    if (!res.headersSent) res.status(500).json({ error: message });
+  }
+});
+
 // ─── 接口：GET /file ───────────────────────────────────────────
-// 获取 MinIO 中某个对象的内容（供前端读取 full.md 内容等）
-// Query: ?objectName=parsed/xxx/full.md
 app.get('/file', async (req, res) => {
   const { objectName } = req.query;
   if (!objectName || typeof objectName !== 'string') {
@@ -551,7 +720,7 @@ app.get('/file', async (req, res) => {
   }
 
   try {
-    const stream = await minioClient.getObject(MINIO_BUCKET, objectName);
+    const stream = await getMinioClient().getObject(getMinioBucket(), objectName);
     const chunks = [];
     for await (const chunk of stream) {
       chunks.push(chunk);
@@ -566,10 +735,200 @@ app.get('/file', async (req, res) => {
   }
 });
 
-app.listen(port, () => {
+// ─── 接口：GET /settings/storage ──────────────────────────────
+// 返回当前 MinIO 配置（密钥脱敏）
+app.get('/settings/storage', (_req, res) => {
+  res.json({
+    storageBackend:  minioState.storageBackend,
+    endpoint:        minioState.endpoint,
+    port:            minioState.port,
+    useSSL:          minioState.useSSL,
+    accessKey:       minioState.accessKey ? '***' : '',
+    secretKey:       minioState.secretKey ? '***' : '',
+    bucket:          minioState.bucket,
+    parsedBucket:    minioState.parsedBucket,
+    presignedExpiry: minioState.presignedExpiry,
+  });
+});
+
+// ─── 接口：PUT /settings/storage ──────────────────────────────
+// 更新运行时 MinIO 配置，并持久化到 db-server
+// Body: MinioConfig（密钥字段为 *** 时保留原值）
+app.put('/settings/storage', async (req, res) => {
+  const body = req.body || {};
+
+  const newState = {
+    storageBackend:  body.storageBackend  ?? minioState.storageBackend,
+    endpoint:        body.endpoint        ?? minioState.endpoint,
+    port:            Number(body.port     ?? minioState.port),
+    useSSL:          body.useSSL          ?? minioState.useSSL,
+    accessKey:       (body.accessKey && body.accessKey !== '***') ? body.accessKey : minioState.accessKey,
+    secretKey:       (body.secretKey && body.secretKey !== '***') ? body.secretKey : minioState.secretKey,
+    bucket:          body.bucket          ?? minioState.bucket,
+    parsedBucket:    body.parsedBucket    ?? minioState.parsedBucket,
+    presignedExpiry: Number(body.presignedExpiry ?? minioState.presignedExpiry),
+  };
+
+  // 更新运行时状态
+  minioState = newState;
+  minioClient = createMinioClient(newState);
+  console.log(`[upload-server] MinIO config updated: ${newState.endpoint}:${newState.port} backend=${newState.storageBackend} bucket=${newState.bucket} parsedBucket=${newState.parsedBucket}`);
+
+  // 异步持久化到 db-server
+  try {
+    await fetch(`${DB_BASE_URL}/settings/minioConfig`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(newState),
+      signal: AbortSignal.timeout(5000),
+    });
+    console.log('[upload-server] MinIO config persisted to db-server');
+  } catch (e) {
+    console.warn('[upload-server] Failed to persist MinIO config to db-server:', e.message);
+  }
+
+  res.json({ ok: true, message: 'MinIO 配置已更新' });
+});
+
+// ─── 接口：POST /settings/storage/test ────────────────────────
+// 测试 MinIO 连接（使用传入配置创建临时 client 测试 bucketExists）
+// Body: MinioConfig
+app.post('/settings/storage/test', async (req, res) => {
+  const body = req.body || {};
+
+  const testState = {
+    endpoint:  body.endpoint  || minioState.endpoint,
+    port:      Number(body.port || minioState.port),
+    useSSL:    body.useSSL    ?? minioState.useSSL,
+    accessKey: (body.accessKey && body.accessKey !== '***') ? body.accessKey : minioState.accessKey,
+    secretKey: (body.secretKey && body.secretKey !== '***') ? body.secretKey : minioState.secretKey,
+  };
+  const testBucket       = body.bucket       || minioState.bucket;
+  const testParsedBucket = body.parsedBucket || minioState.parsedBucket || testBucket;
+
+  console.log(`[upload-server] Testing MinIO connection: ${testState.endpoint}:${testState.port} bucket=${testBucket} parsedBucket=${testParsedBucket}`);
+
+  try {
+    const testClient = createMinioClient(testState);
+
+    // 设置 5 秒超时，同时测试两个 bucket
+    const timeout = (ms) => new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('连接超时（5s）')), ms),
+    );
+    const [rawExists, parsedExists] = await Promise.race([
+      Promise.all([
+        testClient.bucketExists(testBucket),
+        testClient.bucketExists(testParsedBucket),
+      ]),
+      timeout(5000),
+    ]);
+
+    const rawMsg    = rawExists    ? `"${testBucket}" 存在` : `"${testBucket}" 不存在（将在首次上传时自动创建）`;
+    const parsedMsg = parsedExists ? `"${testParsedBucket}" 存在` : `"${testParsedBucket}" 不存在（将在首次解析时自动创建）`;
+
+    res.json({
+      ok: true,
+      message: `连接成功！原始资料 Bucket ${rawMsg}；解析产物 Bucket ${parsedMsg}`,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[upload-server] MinIO test failed:', message);
+    res.status(200).json({ ok: false, message: `连接失败：${message}` });
+  }
+});
+
+// ─── 接口：GET /list ───────────────────────────────────────────
+// 列出 MinIO 指定 prefix 下的所有文件，并为每个对象生成预签名 URL
+// Query: ?prefix=parsed/123
+// Response: { objects: [{ objectName, name, size, lastModified, presignedUrl }], total }
+app.get('/list', async (req, res) => {
+  const { prefix } = req.query;
+  if (!prefix || typeof prefix !== 'string') {
+    res.status(400).json({ error: '缺少 prefix 参数' });
+    return;
+  }
+
+  try {
+    const client = getMinioClient();
+    const bucket = getParsedBucket();
+    const objects = [];
+
+    await new Promise((resolve, reject) => {
+      const stream = client.listObjectsV2(bucket, prefix, true);
+      stream.on('data', (obj) => {
+        if (obj.name) objects.push(obj);
+      });
+      stream.on('end', resolve);
+      stream.on('error', reject);
+    });
+
+    // 为每个对象生成预签名 URL
+    const result = await Promise.all(
+      objects.map(async (obj) => {
+        let presignedUrl = '';
+        try {
+          presignedUrl = await client.presignedGetObject(bucket, obj.name, getPresignedExpiry());
+        } catch (e) {
+          console.warn(`[upload-server] presign failed for ${obj.name}:`, e.message);
+        }
+        // 提取短文件名（去掉 prefix 部分）
+        const name = obj.name.replace(/^.*\//, '');
+        return {
+          objectName: obj.name,
+          name: name || obj.name,
+          size: obj.size ?? 0,
+          lastModified: obj.lastModified ? new Date(obj.lastModified).toISOString() : '',
+          presignedUrl,
+        };
+      }),
+    );
+
+    res.json({ objects: result, total: result.length });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[upload-server] /list failed (returning empty):', message);
+    // MinIO 不可用时返回空列表，防止前端溯源卡片崩溃
+    res.json({ objects: [], total: 0 });
+  }
+});
+
+// ─── 启动时从 db-server 恢复持久化配置 ────────────────────────
+async function loadPersistedConfig() {
+  try {
+    const res = await fetch(`${DB_BASE_URL}/settings`, {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      console.warn(`[upload-server] loadPersistedConfig: db-server returned ${res.status}`);
+      return;
+    }
+    const settings = await res.json();
+    const saved = settings?.minioConfig;
+    if (!saved || typeof saved !== 'object') return;
+
+    minioState = {
+      storageBackend:  saved.storageBackend  || minioState.storageBackend,
+      endpoint:        saved.endpoint        || minioState.endpoint,
+      port:            Number(saved.port     || minioState.port),
+      useSSL:          saved.useSSL          ?? minioState.useSSL,
+      accessKey:       saved.accessKey       || minioState.accessKey,
+      secretKey:       saved.secretKey       || minioState.secretKey,
+      bucket:          saved.bucket          || minioState.bucket,
+      parsedBucket:    saved.parsedBucket    || minioState.parsedBucket,
+      presignedExpiry: Number(saved.presignedExpiry || minioState.presignedExpiry),
+    };
+    minioClient = createMinioClient(minioState);
+    console.log(`[upload-server] Restored config from db-server: endpoint=${minioState.endpoint} bucket=${minioState.bucket} parsedBucket=${minioState.parsedBucket}`);
+  } catch (e) {
+    console.warn('[upload-server] Could not load persisted config:', e.message);
+  }
+}
+
+app.listen(port, async () => {
   console.log(`[upload-server] listening on http://localhost:${port}`);
-  console.log(`[upload-server] storage backend: ${STORAGE_BACKEND}`);
-  if (STORAGE_BACKEND === 'minio') {
-    console.log(`[upload-server] MinIO: ${process.env.MINIO_ENDPOINT || 'minio'}:${process.env.MINIO_PORT || 9000}`);
+  await loadPersistedConfig();
+  console.log(`[upload-server] storage backend: ${getStorageBackend()}`);
+  if (getStorageBackend() === 'minio') {
+    console.log(`[upload-server] MinIO: ${minioState.endpoint}:${minioState.port}`);
   }
 });

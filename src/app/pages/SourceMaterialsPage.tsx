@@ -140,6 +140,7 @@ export function SourceMaterialsPage() {
       try {
         const formData = new FormData();
         formData.append('file', file);
+        formData.append('materialId', String(newId));
 
         // 通过 Vite proxy 路由到 upload-server，兼容所有部署环境
         const uploadUrl = `/__proxy/upload/upload`;
@@ -164,12 +165,14 @@ export function SourceMaterialsPage() {
               status: 'pending',
               uploadTime: '刚刚',
               metadata: {
-                ...{},
                 fileUrl: result.url,
                 objectName: result.objectName || '',  // MinIO 对象路径（持久引用）
                 fileName: result.fileName,
                 provider: result.provider,
                 mimeType: result.mimeType,
+                // 上传时自动计算的字段
+                ...(result.pages != null ? { pages: String(result.pages) } : {}),
+                ...(result.format ? { format: result.format } : {}),
               },
             },
           },

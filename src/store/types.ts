@@ -196,6 +196,23 @@ export interface AiPromptConfig {
   materialType: string;    // 资料类型提示词
   tags: string;            // 标签提取提示词
   summary: string;         // 摘要生成提示词
+  language: string;        // 语言识别提示词
+  country: string;         // 国家/地区识别提示词
+}
+
+/**
+ * MinIO 存储配置
+ */
+export interface MinioConfig {
+  storageBackend: 'minio' | 'tmpfiles'; // 存储后端
+  endpoint: string;        // MinIO 端点（IP 或域名）
+  port: number;            // MinIO API 端口
+  useSSL: boolean;         // 是否使用 SSL
+  accessKey: string;       // Access Key
+  secretKey: string;       // Secret Key
+  bucket: string;          // 原始资料 Bucket 名称
+  parsedBucket: string;    // MinerU 解析产物 Bucket 名称
+  presignedExpiry: number; // 预签名 URL 有效期（秒）
 }
 
 export interface AiConfig {
@@ -238,6 +255,7 @@ export interface AppState {
   aiRuleSettings: AiRuleSettings;
   aiConfig: AiConfig;              // 大模型 API 配置
   mineruConfig: MinerUConfig;      // MinerU API 配置
+  minioConfig: MinioConfig;        // MinIO 存储配置
   assetDetails: Record<number, AssetDetail>;
 }
 
@@ -267,6 +285,7 @@ export type AppAction =
   | { type: 'UPDATE_AI_RULE_SETTINGS'; payload: Partial<AiRuleSettings> }
   | { type: 'UPDATE_AI_CONFIG'; payload: Partial<AiConfig> }
   | { type: 'UPDATE_MINERU_CONFIG'; payload: Partial<MinerUConfig> }
+  | { type: 'UPDATE_MINIO_CONFIG'; payload: Partial<MinioConfig> }
   // 资产详情操作
   | { type: 'UPDATE_ASSET_TAGS'; payload: { id: number; tags: string[] } }
   // 删除操作

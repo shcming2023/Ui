@@ -147,20 +147,24 @@ export async function submitMinerUTaskByFile(
   if (!batchId) throw new Error('MinerU 未返回 batch_id');
   if (fileUrls.length === 0) throw new Error('MinerU 未返回 OSS 上传地址');
 
-  // 第二步：直接 PUT 文件到 MinerU 的 OSS（不经过本项目服务器）
+  // 第二步：通过后端代理 PUT 文件到 MinerU 的 OSS（避免浏览器直连 OSS 跨域问题）
   onProgress?.(15, '上传文件到解析服务...');
 
   const ossUrl = fileUrls[0];
-  const putRes = await fetch(ossUrl, {
-    method: 'PUT',
-    body: file,
-    headers: {
-      'Content-Type': file.type || 'application/octet-stream',
-    },
+
+  // 通过本项目的 upload-server 代理 PUT，服务端可直接访问阿里云 OSS
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('ossUrl', ossUrl);
+
+  const putRes = await fetch('/__proxy/upload/parse/oss-put', {
+    method: 'POST',
+    body: formData,
   });
 
   if (!putRes.ok) {
-    throw new Error(`文件上传到解析服务失败: HTTP ${putRes.status}`);
+    const errText = await putRes.text();
+    throw new Error(`文件上传到解析服务失败: HTTP ${putRes.status} — ${errText.slice(0, 200)}`);
   }
 
   onProgress?.(25, '文件已提交，等待解析...');

@@ -333,7 +333,7 @@ app.post('/bulk-restore', (req, res) => {
   const {
     materials, assetDetails, processTasks, tasks,
     products, flexibleTags, aiRules,
-    aiRuleSettings, aiConfig, mineruConfig,
+    aiRuleSettings, aiConfig, mineruConfig, minioConfig,
   } = req.body;
 
   const db = readDB();
@@ -362,6 +362,7 @@ app.post('/bulk-restore', (req, res) => {
   if (aiRuleSettings && !db.settings.aiRuleSettings) db.settings.aiRuleSettings = aiRuleSettings;
   if (aiConfig && !db.settings.aiConfig) db.settings.aiConfig = aiConfig;
   if (mineruConfig && !db.settings.mineruConfig) db.settings.mineruConfig = mineruConfig;
+  if (minioConfig && !db.settings.minioConfig) db.settings.minioConfig = minioConfig;
 
   writeDB(db);
   res.json({ ok: true, message: 'bulk restore completed (existing rows skipped)' });

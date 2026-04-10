@@ -21,7 +21,7 @@
 import React, {
   createContext, useContext, useReducer, useEffect, useRef, useState,
 } from 'react';
-import type { AppState, AppAction, AiConfig, MinerUConfig, Material } from './types';
+import type { AppState, AppAction, AiConfig, MinerUConfig, MinioConfig, Material } from './types';
 import { appReducer } from './appReducer';
 import {
   initialMaterials,
@@ -33,6 +33,7 @@ import {
   initialAiRuleSettings,
   initialAiConfig,
   initialMinerUConfig,
+  initialMinioConfig,
   initialAssetDetails,
 } from './mockData';
 
@@ -43,6 +44,7 @@ const DB_BASE = '/__proxy/db';
 const LS = {
   AI:             'app_ai_config',
   MINERU:         'app_mineru_config',
+  MINIO:          'app_minio_config',
   MATERIALS:      'app_materials',
   PROCESS_TASKS:  'app_process_tasks',
   TASKS:          'app_tasks',
@@ -174,6 +176,7 @@ const initialState: AppState = {
   aiRuleSettings:   loadFromStorage(LS.AI_RULE_SETTINGS, initialAiRuleSettings),
   aiConfig:         loadConfigFromStorage<AiConfig>(LS.AI, initialAiConfig),
   mineruConfig:     loadConfigFromStorage<MinerUConfig>(LS.MINERU, initialMinerUConfig),
+  minioConfig:      loadConfigFromStorage<MinioConfig>(LS.MINIO, initialMinioConfig),
   assetDetails:     loadFromStorage(LS.ASSET_DETAILS, initialAssetDetails),
 };
 
@@ -245,6 +248,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
               aiRuleSettings: settings?.aiRuleSettings ?? undefined,
               aiConfig:       settings?.aiConfig ? mergeConfigWithFallback(initialAiConfig, settings.aiConfig) : undefined,
               mineruConfig:   settings?.mineruConfig ? mergeConfigWithFallback(initialMinerUConfig, settings.mineruConfig) : undefined,
+              minioConfig:    settings?.minioConfig ? mergeConfigWithFallback(initialMinioConfig, settings.minioConfig) : undefined,
             },
           });
           console.log(`[appContext] Hydrated from DB (${materials?.length ?? 0} materials, initialized=${isDbInitialized})`);
@@ -262,6 +266,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             aiRuleSettings: state.aiRuleSettings,
             aiConfig:       state.aiConfig,
             mineruConfig:   state.mineruConfig,
+            minioConfig:    state.minioConfig,
           });
           // 打初始化标记，后续刷新不再 seed
           await dbPut('/settings/initialized', true);
@@ -418,6 +423,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!hydratedRef.current) return;
     dbPut('/settings/mineruConfig', state.mineruConfig);
   }, [state.mineruConfig]);
+
+  useEffect(() => {
+    saveToStorage(LS.MINIO, state.minioConfig);
+    if (!hydratedRef.current) return;
+    dbPut('/settings/minioConfig', state.minioConfig);
+  }, [state.minioConfig]);
 
   return (
     <AppContext.Provider value={{ state, dispatch, dbReady }}>

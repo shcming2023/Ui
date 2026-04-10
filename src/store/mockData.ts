@@ -14,6 +14,7 @@ import type {
   AssetDetail,
   AiConfig,
   MinerUConfig,
+  MinioConfig,
 } from './types';
 
 // ==================== 原始资料 ====================
@@ -67,11 +68,13 @@ export const initialAiConfig: AiConfig = {
   enabledFileTypes: ['.pdf', '.docx', '.doc', '.txt', '.md'],
   prompts: {
     title: '根据以下教育资料的内容，生成一个简洁准确的中文资料名称。要求：包含学科、年级、内容类型等关键信息，长度不超过30字。',
-    subject: '分析以下教育资料的内容，识别其所属学科。返回值仅限：数学、语文、英语、物理、化学、生物、历史、地理、政治、其他。',
-    grade: '根据以下教育资料的难度和知识点范围，判断其适用的学段/年级。返回值格式：小学/初中/高中/高三。',
-    materialType: '判断以下教育资料的类型分类。可选值：真题、练习册、试卷、教学资料、讲义、课件、题库、其他。',
+    subject: '分析以下教育资料的内容，识别其所属学科。返回值仅限：数学、语文、英语、物理、化学、生物、历史、地理、政治、科学、综合、其他。',
+    grade: '根据以下教育资料的难度和知识点范围，判断其适用的年级。返回值格式：G1~G12（G1=小学一年级，G7=初中一年级，G10=高中一年级），或"通用"。',
+    materialType: '判断以下教育资料的类型分类。可选值：课本、讲义、练习册、试卷、答案、教案、课件、大纲、其他。',
     tags: '从以下教育资料的 Markdown 内容中提取 3~8 个关键标签，包含学科、年级、考试类型、教材版本、知识点等维度。以逗号分隔的纯文本形式返回。',
     summary: '用 2-3 句话概括以下教育资料的核心内容和适用场景，用于在列表中快速了解资料概况。',
+    language: '识别以下教育资料使用的语言。返回值仅限：中文、英文、双语、其他。',
+    country: '根据以下教育资料的内容（课程体系、考试标准、教材版本等），判断其适用的国家/地区。返回值仅限：中国、英国、美国、新加坡、澳大利亚、加拿大、其他。',
   },
 };
 
@@ -94,3 +97,18 @@ export const initialMinerUConfig: MinerUConfig = {
 
 /** 资产详情（初始数据） */
 export const initialAssetDetails: Record<number, AssetDetail> = {};
+
+// ==================== MinIO 存储配置 ====================
+
+/** MinIO 存储配置（默认值） */
+export const initialMinioConfig: MinioConfig = {
+  storageBackend: 'minio',
+  endpoint: 'minio',
+  port: 9000,
+  useSSL: false,
+  accessKey: 'minioadmin',
+  secretKey: 'minioadmin',
+  bucket: 'eduassets',
+  parsedBucket: 'eduassets-parsed',
+  presignedExpiry: 3600,
+};
