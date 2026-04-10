@@ -618,10 +618,14 @@ app.post('/backup/full-export', async (_req, res) => {
     const materials = Object.values(dbData?.materials || {});
     const rawObjectMap = new Map();
     const parsedObjectMap = new Map();
+    let skippedNonMinioMaterials = 0;
 
     for (const material of materials) {
       const materialId = String(material?.id || '').trim();
-      if (material?.metadata?.provider !== 'minio') continue;
+      if (material?.metadata?.provider !== 'minio') {
+        skippedNonMinioMaterials += 1;
+        continue;
+      }
       if (material?.metadata?.objectName) {
         rawObjectMap.set(material.metadata.objectName, { bucket: rawBucket, objectName: material.metadata.objectName });
       }
@@ -665,6 +669,7 @@ app.post('/backup/full-export', async (_req, res) => {
       materialsCount: materials.length,
       rawObjectCount: rawObjectMap.size,
       parsedObjectCount: parsedObjectMap.size,
+      skippedNonMinioMaterials,
       dbFile: 'db/db-data.json',
     };
 
@@ -718,7 +723,16 @@ app.post('/backup/full-import', backupUpload.single('file'), async (req, res) =>
     await Promise.all([ensureBucket(getMinioClient(), rawBucket), ensureBucket(getMinioClient(), parsedBucket)]);
 
     let importedObjects = 0;
+    let removedExistingObjects = 0;
     let skippedObjects = 0;
+
+    if (mode === 'replace') {
+      const [removedRawObjects, removedParsedObjects] = await Promise.all([
+        removeAllObjects(rawBucket),
+        removeAllObjects(parsedBucket),
+      ]);
+      removedExistingObjects = removedRawObjects + removedParsedObjects;
+    }
 
     for (const entry of Object.values(zip.files)) {
       if (entry.dir) continue;
@@ -757,6 +771,7 @@ app.post('/backup/full-import', backupUpload.single('file'), async (req, res) =>
       ok: true,
       mode,
       importedObjects,
+      removedExistingObjects,
       skippedObjects,
       materialsCount: Object.keys(dbData?.materials || {}).length,
       backupPath: dbResult?.backupPath,
@@ -1349,6 +1364,19 @@ async function listAllObjects(bucket, prefix) {
     stream.on('end', () => resolve(objects));
     stream.on('error', reject);
   });
+}
+
+async function removeAllObjects(bucket, prefix = '') {
+  const objects = await listAllObjects(bucket, prefix);
+  let removed = 0;
+
+  for (let index = 0; index < objects.length; index += 50) {
+    const batch = objects.slice(index, index + 50);
+    await Promise.all(batch.map((item) => getMinioClient().removeObject(bucket, item.name)));
+    removed += batch.length;
+  }
+
+  return removed;
 }
 
 // ─── 接口：POST /delete-material ──────────────────────────────

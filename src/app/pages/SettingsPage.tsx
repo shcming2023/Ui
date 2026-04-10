@@ -163,6 +163,7 @@ export function SettingsPage() {
   const [savingCapacity, setSavingCapacity] = useState(false);
   const [fullImportMode, setFullImportMode] = useState<'replace' | 'merge'>('replace');
   const [confirmState, setConfirmState] = useState<BackupConfirmState | null>(null);
+  const [exportingFull, setExportingFull] = useState(false);
 
   // 切换到 storage tab 时从 upload-server 读取最新配置
   useEffect(() => {
@@ -376,6 +377,9 @@ export function SettingsPage() {
   };
 
   const handleFullExportBackup = async () => {
+    if (exportingFull) return;
+
+    setExportingFull(true);
     try {
       const response = await fetch('/__proxy/upload/backup/full-export', { method: 'POST' });
       if (!response.ok) {
@@ -394,6 +398,8 @@ export function SettingsPage() {
       toast.success('完整资产备份导出成功');
     } catch (error) {
       toast.error(`导出失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setExportingFull(false);
     }
   };
 
@@ -1112,9 +1118,11 @@ export function SettingsPage() {
                 <div className="flex items-center gap-3">
                   <button
                     onClick={handleFullExportBackup}
-                    className="flex items-center gap-2 px-4 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50"
+                    disabled={exportingFull}
+                    className="flex items-center gap-2 px-4 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-60 disabled:cursor-not-allowed"
                   >
-                    <Download size={14} /> 导出完整资产
+                    {exportingFull ? <Loader size={14} className="animate-spin" /> : <Download size={14} />}
+                    {exportingFull ? '正在导出...' : '导出完整资产'}
                   </button>
                   <button
                     onClick={() => fullImportInputRef.current?.click()}
@@ -1123,6 +1131,9 @@ export function SettingsPage() {
                     <Upload size={14} /> 导入完整资产
                   </button>
                 </div>
+                {exportingFull && (
+                  <p className="text-xs text-amber-600">正在打包完整资产，大容量备份可能耗时较长，请勿重复点击。</p>
+                )}
                 <div className="flex gap-4 text-sm text-gray-600">
                   <label className="flex items-center gap-2">
                     <input

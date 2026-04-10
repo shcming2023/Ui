@@ -374,6 +374,7 @@ export function AssetDetailPage() {
 
   // AI 分析状态
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
+  const [creatingProduct, setCreatingProduct] = useState(false);
 
   // 元数据可编辑表单（语言/年级/学科/国家/类型 + 摘要）
   const [metaForm, setMetaForm] = useState({
@@ -814,7 +815,7 @@ export function AssetDetailPage() {
   };
 
   const handleCreateProduct = () => {
-    if (!material || !detail) return;
+    if (creatingProduct || !material || !detail) return;
 
     const markdownLength = mineruMarkdown.trim().length;
     const nextProduct: Product = {
@@ -839,6 +840,7 @@ export function AssetDetailPage() {
       color: 'blue',
     };
 
+    setCreatingProduct(true);
     dispatch({ type: 'ADD_PRODUCT', payload: nextProduct });
     toast.success('已生成成品记录');
     navigate('/products');
@@ -912,9 +914,10 @@ export function AssetDetailPage() {
             <StatusBadge status={detail.status} />
             <button
               onClick={handleCreateProduct}
-              className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100"
+              disabled={creatingProduct}
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-blue-50 text-blue-700 border border-blue-200 rounded-lg hover:bg-blue-100 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              <FileText size={12} /> 生成成品
+              <FileText size={12} /> {creatingProduct ? '生成中...' : '生成成品'}
             </button>
             {detail.status === 'pending' && (
               <button

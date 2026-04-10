@@ -56,6 +56,11 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         processTasks: state.processTasks.filter(
           (t) => t.materialId === undefined || !idSet.has(t.materialId),
         ),
+        products: state.products.filter(
+          (product) =>
+            !idSet.has(Number(String(product.source || '').replace(/^material:/, ''))) &&
+            !(product.lineage || []).some((lineageId) => idSet.has(Number(lineageId))),
+        ),
       };
     }
 
