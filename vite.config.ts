@@ -23,6 +23,8 @@ export default defineConfig({
       'localhost',
     ],
     headers: {
+      // 仅开发环境：允许 iframe 嵌入以支持 Manus 等平台预览。
+      // 生产环境安全策略由 Nginx 配置决定，此处设置不生效。
       'X-Frame-Options': 'ALLOWALL',
       'Content-Security-Policy': "frame-ancestors *",
     },

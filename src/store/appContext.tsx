@@ -2,20 +2,20 @@
  * 全局应用 Context
  *
  * 数据持久化策略（三级降级）：
- *   1. 主存储：SQLite（通过 /__proxy/db/ REST API）
+ *   1. 主存储：db-server（通过 /__proxy/db/ REST API，JSON 文件持久化）
  *   2. 次存储：localStorage（降级兜底，同步写）
  *   3. 内存 fallback：mockData 初始数据（全量 API 失败时）
  *
  * 启动流程：
  *   a. 先用 localStorage 快速渲染（避免白屏）
- *   b. 异步请求 SQLite API
- *   c. 若 API 数据存在，以 SQLite 数据覆盖 localStorage 并更新 state
- *   d. 若 SQLite 库为空，则将当前内存数据 bulk-restore 写入 SQLite
+ *   b. 异步请求 db-server API
+ *   c. 若 API 数据存在，以 db-server 数据覆盖 localStorage 并更新 state
+ *   d. 若 db-server 库为空，则将当前内存数据 bulk-restore 写入 db-server
  *
  * 写操作：
  *   - reducer 照常更新内存 state
  *   - useEffect 监听各 state 切片 → 同步写 localStorage（防丢失）
- *   - useEffect 监听各 state 切片 → 异步 fire-and-forget 写 SQLite（不阻塞 UI）
+ *   - useEffect 监听各 state 切片 → 异步 fire-and-forget 写 db-server（不阻塞 UI）
  */
 
 import React, {
@@ -108,7 +108,7 @@ function loadConfigFromStorage<T extends Record<string, unknown>>(key: string, f
   }
 }
 
-// ─── SQLite API 工具 ───────────────────────────────────────────
+// ─── db-server API 工具 ────────────────────────────────────────
 
 async function dbGet<T>(path: string): Promise<T | null> {
   try {
@@ -185,7 +185,7 @@ const initialState: AppState = {
 interface AppContextValue {
   state: AppState;
   dispatch: React.Dispatch<AppAction>;
-  /** SQLite 加载是否完成（可用于显示加载指示） */
+  /** db-server 加载是否完成（可用于显示加载指示） */
   dbReady: boolean;
 }
 
@@ -197,10 +197,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
   const [dbReady, setDbReady] = useState(false);
 
-  // 防止 SQLite 写操作在 hydration 完成之前触发（初次加载时跳过写操作）
+  // 防止 db-server 写操作在 hydration 完成之前触发（初次加载时跳过写操作）
   const hydratedRef = useRef(false);
 
-  // ── 启动：从 SQLite 加载数据（一次性，挂载后执行）──────────
+  // ── 启动：从 db-server 加载数据（一次性，挂载后执行）──────────
   useEffect(() => {
     let cancelled = false;
 
@@ -273,7 +273,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           console.log('[appContext] DB seeded and marked as initialized');
         }
       } catch (err) {
-        console.warn('[appContext] SQLite hydration failed, using localStorage fallback:', err);
+        console.warn('[appContext] db-server hydration failed, using localStorage fallback:', err);
       } finally {
         if (!cancelled) {
           hydratedRef.current = true;
@@ -288,8 +288,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // ── 用 useRef 追踪上一次的 id 集合，用于检测删除 ───────────
   const prevMaterialIds   = useRef<Set<number>>(new Set(state.materials.map((m) => m.id)));
+  // 保存上一轮完整 materials，用于删除时提取 metadata（删除后 state.materials 已不含被删项）
+  const prevMaterialsRef  = useRef<typeof state.materials>(state.materials);
   const prevAssetIds      = useRef<Set<number>>(new Set(Object.keys(state.assetDetails).map(Number)));
   const prevProcessIds    = useRef<Set<number>>(new Set(state.processTasks.map((t) => t.id)));
+  const prevTaskIds       = useRef<Set<string>>(new Set(state.tasks.map((t) => t.id)));
   const prevProductIds    = useRef<Set<number>>(new Set(state.products.map((p) => p.id)));
   const prevTagIds        = useRef<Set<number>>(new Set(state.flexibleTags.map((t) => t.id)));
   const prevAiRuleIds     = useRef<Set<number>>(new Set(state.aiRules.map((r) => r.id)));
@@ -297,8 +300,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ── 差量指纹：仅对内容变化的记录执行 upsert（#7）──────────
   const materialFingerprintsRef  = useRef<Map<number, string>>(new Map());
   const assetDetailFingerprintsRef = useRef<Map<string, string>>(new Map());
+  const processTaskFingerprintsRef = useRef<Map<number, string>>(new Map());
+  const taskFingerprintsRef        = useRef<Map<string, string>>(new Map());
+  const productFingerprintsRef     = useRef<Map<number, string>>(new Map());
+  const tagFingerprintsRef         = useRef<Map<number, string>>(new Map());
+  const aiRuleFingerprintsRef      = useRef<Map<number, string>>(new Map());
 
-  // ── 持久化：localStorage（同步）+ SQLite（异步）────────────
+  // ── 持久化：localStorage（同步）+ db-server（异步）────────────
 
   useEffect(() => {
     saveToStorage(LS.MATERIALS, state.materials);
@@ -306,10 +314,22 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const currentIds = new Set(state.materials.map((m) => m.id));
 
     if (hydratedRef.current) {
-      // 检测删除：上一轮有、这一轮没有的 id 需要从 SQLite 删除
+      // 检测删除：上一轮有、这一轮没有的 id 需要从 db-server 删除
       const deletedIds = [...prevMaterialIds.current].filter((id) => !currentIds.has(id));
       if (deletedIds.length > 0) {
         dbDelete('/materials', { ids: deletedIds });
+        // fire-and-forget：清理 MinIO 存储（非关键路径，失败不阻塞 UI）
+        // 从 prevMaterialsRef 取被删 material 的完整 metadata，
+        // 让 upload-server 按 metadata.provider 决定是否清理，而非依赖当前运行时配置
+        const deletedMaterials = prevMaterialsRef.current
+          .filter((m) => deletedIds.includes(m.id))
+          .map((m) => ({ id: m.id, metadata: m.metadata }));
+        fetch('/__proxy/upload/delete-material', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ materialIds: deletedIds, materials: deletedMaterials }),
+          signal: AbortSignal.timeout(30_000),
+        }).catch((e) => console.warn('[appContext] MinIO cleanup failed:', e.message));
       }
       // 差量 upsert：仅对内容指纹变化的记录执行 POST（#7）
       for (const m of state.materials) {
@@ -321,8 +341,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
     }
 
-    // 无论是否 hydrated，始终更新 prevMaterialIds，确保后续删除比对正确
+    // 无论是否 hydrated，始终更新 prevMaterialIds / prevMaterialsRef，确保后续删除比对正确
     prevMaterialIds.current = currentIds;
+    prevMaterialsRef.current = state.materials;
   }, [state.materials]);
 
   useEffect(() => {
@@ -349,20 +370,39 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!hydratedRef.current) return;
 
     const currentIds = new Set(state.processTasks.map((t) => t.id));
-    prevProcessIds.current = currentIds;
-
-    for (const t of state.processTasks) {
-      dbPost('/process-tasks', t);
+    const deletedIds = [...prevProcessIds.current].filter((id) => !currentIds.has(id));
+    if (deletedIds.length > 0) {
+      dbDelete('/process-tasks', { ids: deletedIds });
     }
+    for (const t of state.processTasks) {
+      const fp = JSON.stringify(t);
+      if (processTaskFingerprintsRef.current.get(t.id) !== fp) {
+        processTaskFingerprintsRef.current.set(t.id, fp);
+        dbPost('/process-tasks', t);
+      }
+    }
+    prevProcessIds.current = currentIds;
   }, [state.processTasks]);
 
   useEffect(() => {
     saveToStorage(LS.TASKS, state.tasks);
     if (!hydratedRef.current) return;
-    // tasks 较少变更，仅 upsert（无批量删除操作）
-    for (const t of state.tasks) {
-      dbPost('/tasks', t);
+
+    const currentIds = new Set(state.tasks.map((t) => t.id));
+    // 检测删除：上一轮有、这一轮没有的 id 需要从 db-server 删除
+    const deletedIds = [...prevTaskIds.current].filter((id) => !currentIds.has(id));
+    if (deletedIds.length > 0) {
+      dbDelete('/tasks', { ids: deletedIds });
     }
+    // 差量 upsert：仅对内容指纹变化的记录执行 POST
+    for (const t of state.tasks) {
+      const fp = JSON.stringify(t);
+      if (taskFingerprintsRef.current.get(t.id) !== fp) {
+        taskFingerprintsRef.current.set(t.id, fp);
+        dbPost('/tasks', t);
+      }
+    }
+    prevTaskIds.current = currentIds;
   }, [state.tasks]);
 
   useEffect(() => {
@@ -376,7 +416,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dbDelete('/products', { ids: deletedIds });
       }
       for (const p of state.products) {
-        dbPost('/products', p);
+        const fp = JSON.stringify(p);
+        if (productFingerprintsRef.current.get(p.id) !== fp) {
+          productFingerprintsRef.current.set(p.id, fp);
+          dbPost('/products', p);
+        }
       }
     }
 
@@ -394,7 +438,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dbDelete('/flexible-tags', { ids: deletedIds });
       }
       for (const tag of state.flexibleTags) {
-        dbPost('/flexible-tags', tag);
+        const fp = JSON.stringify(tag);
+        if (tagFingerprintsRef.current.get(tag.id) !== fp) {
+          tagFingerprintsRef.current.set(tag.id, fp);
+          dbPost('/flexible-tags', tag);
+        }
       }
     }
 
@@ -412,7 +460,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         dbDelete('/ai-rules', { ids: deletedIds });
       }
       for (const rule of state.aiRules) {
-        dbPost('/ai-rules', rule);
+        const fp = JSON.stringify(rule);
+        if (aiRuleFingerprintsRef.current.get(rule.id) !== fp) {
+          aiRuleFingerprintsRef.current.set(rule.id, fp);
+          dbPost('/ai-rules', rule);
+        }
       }
     }
 

@@ -3,19 +3,11 @@ import { useNavigate } from 'react-router-dom';
 import { Search, Upload, Grid, List, SortAsc, AlertTriangle, RefreshCw, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 
-/** 兼容 iframe 环境的删除确认（window.confirm 在内置浏览器中可能被屏蔽） */
+/** 删除确认弹窗（始终使用 toast，避免 window.confirm 在各类环境中被屏蔽） */
 function confirmDelete(message: string): Promise<boolean> {
   return new Promise((resolve) => {
-    // 先尝试原生 confirm，若返回 undefined（被沙箱拦截）则改用 toast
-    let result: boolean | undefined;
-    try { result = window.confirm(message); } catch { result = undefined; }
-    if (result !== undefined) {
-      resolve(result);
-      return;
-    }
-    // 降级：用 sonner toast 替代确认框
     toast(message, {
-      duration: 8000,
+      duration: 10000,
       action: {
         label: '确认删除',
         onClick: () => resolve(true),
@@ -209,8 +201,11 @@ export function SourceMaterialsPage() {
   // 重置配置
   const handleResetConfig = () => {
     try {
+      // 清除所有配置类 localStorage key（不包含业务数据）
       localStorage.removeItem('app_ai_config');
       localStorage.removeItem('app_mineru_config');
+      localStorage.removeItem('app_minio_config');       // MinIO 存储配置
+      localStorage.removeItem('app_ai_rule_settings');   // AI 规则执行设置
       toast.success('配置已重置，页面将刷新');
       setTimeout(() => window.location.reload(), 1000);
     } catch (error) {
@@ -230,11 +225,22 @@ export function SourceMaterialsPage() {
   // 批量删除
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return;
-    const ok = await confirmDelete(`确定删除选中的 ${selectedIds.size} 条资料吗？此操作不可撤销。`);
+    const ids = Array.from(selectedIds);
+    const relatedTaskCount = state.processTasks.filter(
+      (t) => t.materialId !== undefined && ids.includes(t.materialId),
+    ).length;
+    const hasUploaded = ids.some((id) => {
+      const m = state.materials.find((mat) => mat.id === id);
+      return m?.metadata?.objectName || m?.mineruStatus || m?.aiStatus;
+    });
+    let msg = `确定删除选中的 ${ids.length} 条资料吗？此操作不可撤销。`;
+    if (hasUploaded) msg += '\n\n⚠️ 其中部分资料已上传至云存储，删除后原始文件和解析产物将一并清除。';
+    if (relatedTaskCount > 0) msg += `\n关联的 ${relatedTaskCount} 条处理任务也将同步删除。`;
+    const ok = await confirmDelete(msg);
     if (!ok) return;
-    dispatch({ type: 'DELETE_MATERIAL', payload: Array.from(selectedIds) });
+    dispatch({ type: 'DELETE_MATERIAL', payload: ids });
     setSelectedIds(new Set());
-    toast.success(`已删除 ${selectedIds.size} 条资料`);
+    toast.success(`已删除 ${ids.length} 条资料`);
   };
 
   // 单条删除
@@ -242,19 +248,36 @@ export function SourceMaterialsPage() {
     e.stopPropagation();
     const material = state.materials.find((m) => m.id === id);
     const name = material?.title ?? '该资料';
-    const ok = await confirmDelete(`确定删除「${name}」吗？此操作不可撤销。`);
+    const relatedTaskCount = state.processTasks.filter((t) => t.materialId === id).length;
+    let msg = `确定删除「${name}」吗？此操作不可撤销。`;
+    if (material?.metadata?.objectName || material?.mineruStatus || material?.aiStatus) {
+      msg += '\n\n⚠️ 该资料已上传至云存储，删除后原始文件和解析产物将一并清除。';
+    }
+    if (relatedTaskCount > 0) msg += `\n关联的 ${relatedTaskCount} 条处理任务也将同步删除。`;
+    const ok = await confirmDelete(msg);
     if (!ok) return;
     dispatch({ type: 'DELETE_MATERIAL', payload: [id] });
     setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
     toast.success('已删除');
   };
 
-  // 清空所有数据（localStorage + 内存，SQLite 通过 DELETE_MATERIAL 联动删除）
+  // 清空所有数据（localStorage + 内存，db-server 通过 DELETE_MATERIAL 联动删除）
   const handleClearAll = async () => {
     if (state.materials.length === 0) { toast('暂无数据'); return; }
-    const ok = await confirmDelete(`确定清空全部 ${state.materials.length} 条资料吗？此操作不可撤销。`);
-    if (!ok) return;
     const allIds = state.materials.map((m) => m.id);
+    const totalTaskCount = state.processTasks.filter(
+      (t) => t.materialId !== undefined && allIds.includes(t.materialId),
+    ).length;
+    const uploadedCount = state.materials.filter(
+      (m) => m.metadata?.objectName || m.mineruStatus || m.aiStatus,
+    ).length;
+    let msg = `确定清空全部 ${state.materials.length} 条资料吗？此操作不可撤销。`;
+    if (uploadedCount > 0) {
+      msg += `\n\n⚠️ 其中 ${uploadedCount} 条资料已上传至云存储，删除后原始文件和解析产物将一并清除。`;
+    }
+    if (totalTaskCount > 0) msg += `\n关联的 ${totalTaskCount} 条处理任务也将同步删除。`;
+    const ok = await confirmDelete(msg);
+    if (!ok) return;
     dispatch({ type: 'DELETE_MATERIAL', payload: allIds });
     setSelectedIds(new Set());
     toast.success(`已清空全部 ${allIds.length} 条资料`);

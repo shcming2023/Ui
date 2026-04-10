@@ -3,7 +3,7 @@
 #
 # 支持的服务：
 #   upload-server.mjs  ── 文件上传代理（端口 8788）
-#   db-server.mjs      ── SQLite REST API（端口 8789）
+#   db-server.mjs      ── JSON 文件持久化 REST API（端口 8789）
 #
 # 通过 docker-compose 的 command 字段选择启动哪个服务：
 #   command: ["node", "server/upload-server.mjs"]

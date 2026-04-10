@@ -33,6 +33,39 @@ export type TagColor =
 
 // ==================== 数据模型 ====================
 
+/** Material 元数据（各阶段逐步写入，所有字段均为可选） */
+export interface MaterialMetadata {
+  // ── 上传阶段写入 ──
+  fileUrl?: string;                // tmpfiles 公开访问 URL
+  objectName?: string;             // MinIO 对象存储路径（如 "originals/1234/file.pdf"）
+  fileName?: string;               // 原始文件名
+  provider?: 'minio' | 'tmpfiles'; // 存储后端
+  mimeType?: string;               // MIME 类型
+  format?: string;                 // 文件格式（PDF / DOCX 等）
+  pages?: string;                  // 页数
+
+  // ── MinerU 解析阶段写入 ──
+  markdownObjectName?: string;     // 解析产物 full.md 的 MinIO 路径
+  markdownUrl?: string;            // full.md 的 presigned URL
+  parsedFilesCount?: string;       // 解析产物文件数量
+  parsedAt?: string;               // 解析完成时间（ISO 8601）
+
+  // ── AI 分析阶段写入 ──
+  subject?: string;                // 学科
+  grade?: string;                  // 年级
+  language?: string;               // 语言
+  country?: string;                // 国家/地区
+  type?: string;                   // 资料类型
+  summary?: string;                // 内容摘要
+  standard?: string;               // 课标/标准
+  region?: string;                 // 地区
+  aiConfidence?: string;           // AI 识别置信度（百分比）
+  aiAnalyzedAt?: string;           // AI 分析完成时间（ISO 8601）
+
+  // 扩展字段（兼容未来新增）
+  [key: string]: string | undefined;
+}
+
 /**
  * 原始资料
  */
@@ -48,7 +81,7 @@ export interface Material {
   mineruStatus: MinerUStatus; // MinerU 解析状态
   aiStatus: AiStatus;         // AI 分析状态（基于 MinerU 输出的 Markdown）
   tags: string[];
-  metadata: Record<string, string>;
+  metadata: MaterialMetadata;
   uploader: string;
   previewUrl?: string;       // 本地 blob URL 或 tmpfiles 公开 URL，用于文件预览
   mineruZipUrl?: string;     // MinerU 解析后的 ZIP 文件下载链接
@@ -262,7 +295,7 @@ export interface AppState {
 // ==================== Action 类型 ====================
 
 export type AppAction =
-  // 数据库 hydration（启动时从 SQLite 加载）
+  // 数据库 hydration（启动时从 db-server 加载）
   | { type: 'HYDRATE_FROM_DB'; payload: Partial<AppState> }
   // 资料操作
   | { type: 'ADD_MATERIAL'; payload: Material }
@@ -270,7 +303,7 @@ export type AppAction =
   | { type: 'UPDATE_MATERIAL'; payload: { id: number; updates: Partial<Material> } }
   | { type: 'BATCH_ADD_TAGS'; payload: { ids: number[]; tags: string[] } }
   | { type: 'UPDATE_MATERIAL_TAGS'; payload: { id: number; tags: string[] } }
-  | { type: 'UPDATE_MATERIAL_AI_STATUS'; payload: { id: number; aiStatus: AiStatus; status?: AssetStatus; tags?: string[]; metadata?: Record<string, string>; title?: string } }
+  | { type: 'UPDATE_MATERIAL_AI_STATUS'; payload: { id: number; aiStatus: AiStatus; status?: AssetStatus; tags?: string[]; metadata?: MaterialMetadata; title?: string } }
   | { type: 'UPDATE_MATERIAL_MINERU_STATUS'; payload: { id: number; mineruStatus: MinerUStatus; aiStatus?: AiStatus; status?: AssetStatus; mineruCompletedAt?: number } }
   | { type: 'UPDATE_MATERIAL_PREVIEW_URL'; payload: { id: number; previewUrl: string } }
   | { type: 'UPDATE_MATERIAL_MINERU_ZIP_URL'; payload: { id: number; mineruZipUrl: string } }

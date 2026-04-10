@@ -66,21 +66,32 @@ let dbCache = (() => {
   }
 })();
 
+// ─── Health ───────────────────────────────────────────────────
+
+// ─── writeDB debounce 计时器 ──────────────────────────────────
+let writeTimer = null;
+
 /**
- * 将内存缓存原子写入磁盘（#5 write-tmp + rename）
- * 写入失败时抛出异常，调用方负责返回 HTTP 500（#9）
+ * 将内存缓存原子写入磁盘（debounce 100ms）
+ * - dbCache 由各路由 handler 实时更新，GET 请求始终读内存，保证一致性
+ * - 真正的磁盘 I/O 在 100ms 后触发，期间重复调用重置计时器
+ * - 磁盘错误在回调内 console.error 记录，不向请求方返回 500
  */
 function writeDB() {
-  const dir = path.dirname(DATA_PATH);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-  const tmpPath = DATA_PATH + '.tmp';
-  writeFileSync(tmpPath, JSON.stringify(dbCache, null, 2), 'utf-8');
-  renameSync(tmpPath, DATA_PATH);
+  if (writeTimer) clearTimeout(writeTimer);
+  writeTimer = setTimeout(() => {
+    const dir = path.dirname(DATA_PATH);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const tmpPath = DATA_PATH + '.tmp';
+    try {
+      writeFileSync(tmpPath, JSON.stringify(dbCache, null, 2), 'utf-8');
+      renameSync(tmpPath, DATA_PATH);
+    } catch (e) {
+      console.error('[db-server] writeDB flush failed:', e.message);
+    }
+    writeTimer = null;
+  }, 100);
 }
-
-console.log(`[db-server] Data file: ${DATA_PATH}`);
-
-// ─── Health ───────────────────────────────────────────────────
 
 app.get('/health', (_req, res) => {
   res.json({ ok: true, service: 'db-server', dataPath: DATA_PATH });
@@ -102,45 +113,30 @@ app.get('/materials/:id', (req, res) => {
 app.post('/materials', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  try {
-    dbCache.materials[item.id] = item;
-    writeDB();
-    res.json({ ok: true, id: item.id });
-  } catch (e) {
-    console.error('[db-server] POST /materials write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.materials[item.id] = item;
+  writeDB();
+  res.json({ ok: true, id: item.id });
 });
 
 app.put('/materials/:id', (req, res) => {
   const id = req.params.id;
-  try {
-    dbCache.materials[id] = { ...req.body, id: req.body.id ?? id };
-    writeDB();
-    res.json({ ok: true, id });
-  } catch (e) {
-    console.error('[db-server] PUT /materials write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.materials[id] = { ...req.body, id: req.body.id ?? id };
+  writeDB();
+  res.json({ ok: true, id });
 });
 
 app.patch('/materials/:id', (req, res) => {
   const id = req.params.id;
   const existing = dbCache.materials[id];
   if (!existing) { res.status(404).json({ error: 'not found' }); return; }
-  try {
-    const merged = {
-      ...existing,
-      ...req.body,
-      ...(req.body.metadata ? { metadata: { ...existing.metadata, ...req.body.metadata } } : {}),
-    };
-    dbCache.materials[id] = merged;
-    writeDB();
-    res.json({ ok: true, id, data: merged });
-  } catch (e) {
-    console.error('[db-server] PATCH /materials write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  const merged = {
+    ...existing,
+    ...req.body,
+    ...(req.body.metadata ? { metadata: { ...existing.metadata, ...req.body.metadata } } : {}),
+  };
+  dbCache.materials[id] = merged;
+  writeDB();
+  res.json({ ok: true, id, data: merged });
 });
 
 app.delete('/materials', (req, res) => {
@@ -148,17 +144,12 @@ app.delete('/materials', (req, res) => {
   if (!Array.isArray(ids) || ids.length === 0) {
     res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
-  try {
-    for (const id of ids) {
-      delete dbCache.materials[id];
-      delete dbCache.assetDetails[id]; // 联动删除
-    }
-    writeDB();
-    res.json({ ok: true, deleted: ids.length });
-  } catch (e) {
-    console.error('[db-server] DELETE /materials write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
+  for (const id of ids) {
+    delete dbCache.materials[id];
+    delete dbCache.assetDetails[id]; // 联动删除
   }
+  writeDB();
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── Asset Details ────────────────────────────────────────────
@@ -175,14 +166,9 @@ app.get('/asset-details/:id', (req, res) => {
 
 app.put('/asset-details/:id', (req, res) => {
   const id = req.params.id;
-  try {
-    dbCache.assetDetails[id] = { ...req.body, id: req.body.id ?? id };
-    writeDB();
-    res.json({ ok: true, id });
-  } catch (e) {
-    console.error('[db-server] PUT /asset-details write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.assetDetails[id] = { ...req.body, id: req.body.id ?? id };
+  writeDB();
+  res.json({ ok: true, id });
 });
 
 // ─── Process Tasks ────────────────────────────────────────────
@@ -195,28 +181,28 @@ app.get('/process-tasks', (_req, res) => {
 app.post('/process-tasks', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  try {
-    dbCache.processTasks[item.id] = item;
-    writeDB();
-    res.json({ ok: true, id: item.id });
-  } catch (e) {
-    console.error('[db-server] POST /process-tasks write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.processTasks[item.id] = item;
+  writeDB();
+  res.json({ ok: true, id: item.id });
 });
 
 app.patch('/process-tasks/:id', (req, res) => {
   const id = req.params.id;
   const existing = dbCache.processTasks[id];
   if (!existing) { res.status(404).json({ error: 'not found' }); return; }
-  try {
-    dbCache.processTasks[id] = { ...existing, ...req.body };
-    writeDB();
-    res.json({ ok: true, id });
-  } catch (e) {
-    console.error('[db-server] PATCH /process-tasks write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
+  dbCache.processTasks[id] = { ...existing, ...req.body };
+  writeDB();
+  res.json({ ok: true, id });
+});
+
+app.delete('/process-tasks', (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
+  for (const id of ids) delete dbCache.processTasks[id];
+  writeDB();
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── Tasks ────────────────────────────────────────────────────
@@ -228,28 +214,28 @@ app.get('/tasks', (_req, res) => {
 app.post('/tasks', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  try {
-    dbCache.tasks[item.id] = item;
-    writeDB();
-    res.json({ ok: true, id: item.id });
-  } catch (e) {
-    console.error('[db-server] POST /tasks write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.tasks[item.id] = item;
+  writeDB();
+  res.json({ ok: true, id: item.id });
 });
 
 app.patch('/tasks/:id', (req, res) => {
   const id = req.params.id;
   const existing = dbCache.tasks[id];
   if (!existing) { res.status(404).json({ error: 'not found' }); return; }
-  try {
-    dbCache.tasks[id] = { ...existing, ...req.body };
-    writeDB();
-    res.json({ ok: true, id });
-  } catch (e) {
-    console.error('[db-server] PATCH /tasks write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
+  dbCache.tasks[id] = { ...existing, ...req.body };
+  writeDB();
+  res.json({ ok: true, id });
+});
+
+app.delete('/tasks', (req, res) => {
+  const { ids } = req.body;
+  if (!Array.isArray(ids) || ids.length === 0) {
+    res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
+  for (const id of ids) delete dbCache.tasks[id];
+  writeDB();
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── Products ─────────────────────────────────────────────────
@@ -262,14 +248,9 @@ app.get('/products', (_req, res) => {
 app.post('/products', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  try {
-    dbCache.products[item.id] = item;
-    writeDB();
-    res.json({ ok: true, id: item.id });
-  } catch (e) {
-    console.error('[db-server] POST /products write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.products[item.id] = item;
+  writeDB();
+  res.json({ ok: true, id: item.id });
 });
 
 app.delete('/products', (req, res) => {
@@ -277,14 +258,9 @@ app.delete('/products', (req, res) => {
   if (!Array.isArray(ids) || ids.length === 0) {
     res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
-  try {
-    for (const id of ids) delete dbCache.products[id];
-    writeDB();
-    res.json({ ok: true, deleted: ids.length });
-  } catch (e) {
-    console.error('[db-server] DELETE /products write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  for (const id of ids) delete dbCache.products[id];
+  writeDB();
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── Flexible Tags ────────────────────────────────────────────
@@ -296,14 +272,9 @@ app.get('/flexible-tags', (_req, res) => {
 app.post('/flexible-tags', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  try {
-    dbCache.flexibleTags[item.id] = item;
-    writeDB();
-    res.json({ ok: true, id: item.id });
-  } catch (e) {
-    console.error('[db-server] POST /flexible-tags write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.flexibleTags[item.id] = item;
+  writeDB();
+  res.json({ ok: true, id: item.id });
 });
 
 app.delete('/flexible-tags', (req, res) => {
@@ -311,14 +282,9 @@ app.delete('/flexible-tags', (req, res) => {
   if (!Array.isArray(ids) || ids.length === 0) {
     res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
-  try {
-    for (const id of ids) delete dbCache.flexibleTags[id];
-    writeDB();
-    res.json({ ok: true, deleted: ids.length });
-  } catch (e) {
-    console.error('[db-server] DELETE /flexible-tags write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  for (const id of ids) delete dbCache.flexibleTags[id];
+  writeDB();
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── AI Rules ─────────────────────────────────────────────────
@@ -330,28 +296,18 @@ app.get('/ai-rules', (_req, res) => {
 app.post('/ai-rules', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  try {
-    dbCache.aiRules[item.id] = item;
-    writeDB();
-    res.json({ ok: true, id: item.id });
-  } catch (e) {
-    console.error('[db-server] POST /ai-rules write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.aiRules[item.id] = item;
+  writeDB();
+  res.json({ ok: true, id: item.id });
 });
 
 app.patch('/ai-rules/:id', (req, res) => {
   const id = req.params.id;
   const existing = dbCache.aiRules[id];
   if (!existing) { res.status(404).json({ error: 'not found' }); return; }
-  try {
-    dbCache.aiRules[id] = { ...existing, ...req.body };
-    writeDB();
-    res.json({ ok: true, id });
-  } catch (e) {
-    console.error('[db-server] PATCH /ai-rules write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.aiRules[id] = { ...existing, ...req.body };
+  writeDB();
+  res.json({ ok: true, id });
 });
 
 app.delete('/ai-rules', (req, res) => {
@@ -359,14 +315,9 @@ app.delete('/ai-rules', (req, res) => {
   if (!Array.isArray(ids) || ids.length === 0) {
     res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
-  try {
-    for (const id of ids) delete dbCache.aiRules[id];
-    writeDB();
-    res.json({ ok: true, deleted: ids.length });
-  } catch (e) {
-    console.error('[db-server] DELETE /ai-rules write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  for (const id of ids) delete dbCache.aiRules[id];
+  writeDB();
+  res.json({ ok: true, deleted: ids.length });
 });
 
 // ─── Settings ─────────────────────────────────────────────────
@@ -377,14 +328,9 @@ app.get('/settings', (_req, res) => {
 
 app.put('/settings/:key', (req, res) => {
   const { key } = req.params;
-  try {
-    dbCache.settings[key] = req.body;
-    writeDB();
-    res.json({ ok: true, key });
-  } catch (e) {
-    console.error('[db-server] PUT /settings write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  dbCache.settings[key] = req.body;
+  writeDB();
+  res.json({ ok: true, key });
 });
 
 // ─── Bulk Restore ─────────────────────────────────────────────
@@ -422,13 +368,8 @@ app.post('/bulk-restore', (req, res) => {
   if (mineruConfig && !dbCache.settings.mineruConfig) dbCache.settings.mineruConfig = mineruConfig;
   if (minioConfig && !dbCache.settings.minioConfig) dbCache.settings.minioConfig = minioConfig;
 
-  try {
-    writeDB();
-    res.json({ ok: true, message: 'bulk restore completed (existing rows skipped)' });
-  } catch (e) {
-    console.error('[db-server] POST /bulk-restore write failed:', e.message);
-    res.status(500).json({ error: 'write failed', detail: e.message });
-  }
+  writeDB();
+  res.json({ ok: true, message: 'bulk restore completed (existing rows skipped)' });
 });
 
 // ─── 全局错误处理中间件（#13）─────────────────────────────────

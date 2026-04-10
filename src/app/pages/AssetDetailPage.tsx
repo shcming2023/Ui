@@ -51,13 +51,13 @@ function FileLineageCard({
 }: {
   material: NonNullable<ReturnType<typeof useAppStore>['state']['materials'][0]>;
 }) {
-  const objectName = material.metadata?.objectName as string | undefined;
-  const provider   = material.metadata?.provider as string | undefined;
-  const markdownObjectName = material.metadata?.markdownObjectName as string | undefined;
-  const parsedFilesCount   = material.metadata?.parsedFilesCount as string | undefined;
-  const parsedAt           = material.metadata?.parsedAt as string | undefined;
-  const aiConfidence       = material.metadata?.aiConfidence as string | undefined;
-  const aiAnalyzedAt       = material.metadata?.aiAnalyzedAt as string | undefined;
+  const objectName = material.metadata?.objectName;
+  const provider   = material.metadata?.provider;
+  const markdownObjectName = material.metadata?.markdownObjectName;
+  const parsedFilesCount   = material.metadata?.parsedFilesCount;
+  const parsedAt           = material.metadata?.parsedAt;
+  const aiConfidence       = material.metadata?.aiConfidence;
+  const aiAnalyzedAt       = material.metadata?.aiAnalyzedAt;
 
   const [originalUrl, setOriginalUrl]   = useState<string | null>(null);
   const [refreshing, setRefreshing]     = useState(false);
@@ -158,7 +158,7 @@ function FileLineageCard({
                   <span>大小：<span className="text-gray-700">{material.size}</span></span>
                 )}
                 {material.metadata?.format && (
-                  <span>格式：<span className="text-gray-700">{material.metadata.format as string}</span></span>
+                  <span>格式：<span className="text-gray-700">{material.metadata.format}</span></span>
                 )}
                 {provider && (
                   <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${provider === 'minio' ? 'bg-blue-50 text-blue-600' : 'bg-gray-200 text-gray-500'}`}>
@@ -302,13 +302,13 @@ function FileLineageCard({
             </p>
             <div className="space-y-0.5 text-xs text-gray-500">
               {material.metadata?.subject && (
-                <p>学科：<span className="text-gray-700">{material.metadata.subject as string}</span></p>
+                <p>学科：<span className="text-gray-700">{material.metadata.subject}</span></p>
               )}
               {material.metadata?.grade && (
-                <p>年级：<span className="text-gray-700">{material.metadata.grade as string}</span></p>
+                <p>年级：<span className="text-gray-700">{material.metadata.grade}</span></p>
               )}
               {material.metadata?.language && (
-                <p>语言：<span className="text-gray-700">{material.metadata.language as string}</span></p>
+                <p>语言：<span className="text-gray-700">{material.metadata.language}</span></p>
               )}
               {aiAnalyzedAt && (
                 <p>分析时间：<span className="text-gray-700">{new Date(aiAnalyzedAt).toLocaleString('zh-CN')}</span></p>
@@ -375,12 +375,12 @@ export function AssetDetailPage() {
 
   // 元数据可编辑表单（语言/年级/学科/国家/类型 + 摘要）
   const [metaForm, setMetaForm] = useState({
-    language:    (material?.metadata?.language as string) || '',
-    grade:       (material?.metadata?.grade as string) || '',
-    subject:     (material?.metadata?.subject as string) || '',
-    country:     (material?.metadata?.country as string) || '',
-    type:        (material?.metadata?.type as string) || '',
-    summary:     (material?.metadata?.summary as string) || '',
+    language:    material?.metadata?.language || '',
+    grade:       material?.metadata?.grade || '',
+    subject:     material?.metadata?.subject || '',
+    country:     material?.metadata?.country || '',
+    type:        material?.metadata?.type || '',
+    summary:     material?.metadata?.summary || '',
   });
 
   const updateMeta = (key: keyof typeof metaForm, val: string) =>
@@ -431,8 +431,8 @@ export function AssetDetailPage() {
       return;
     }
 
-    const objectName = material.metadata?.objectName as string | undefined;
-    const fileUrl = material.metadata?.fileUrl as string | undefined;
+    const objectName = material.metadata?.objectName;
+    const fileUrl = material.metadata?.fileUrl;
 
     if (!objectName && !fileUrl) {
       toast.error('文件尚未上传或缺少访问地址');
@@ -529,8 +529,8 @@ export function AssetDetailPage() {
   const handleAiAnalyze = async () => {
     if (!material) { toast.error('找不到资料信息'); return; }
 
-    let markdownObjectName = material.metadata?.markdownObjectName as string | undefined;
-    let markdownUrl = material.metadata?.markdownUrl as string | undefined;
+    let markdownObjectName = material.metadata?.markdownObjectName;
+    let markdownUrl = material.metadata?.markdownUrl;
     const inlineMarkdownContent = mineruMarkdown || undefined;
 
     if (!markdownObjectName && !markdownUrl && !inlineMarkdownContent && material.mineruZipUrl) {
@@ -678,6 +678,7 @@ export function AssetDetailPage() {
 
   const handleSaveTags = () => {
     dispatch({ type: 'UPDATE_ASSET_TAGS', payload: { id: numId, tags: localTags } });
+    dispatch({ type: 'UPDATE_MATERIAL_TAGS', payload: { id: numId, tags: localTags } });
     setEditingTags(false);
     toast.success('标签已保存');
   };
@@ -807,7 +808,7 @@ export function AssetDetailPage() {
               )}
               {material?.metadata?.objectName && (
                 <p className="text-gray-400 break-all font-mono">
-                  存储路径：{material.metadata.objectName as string}
+                  存储路径：{material.metadata.objectName}
                 </p>
               )}
               {material?.metadata?.markdownObjectName && (
@@ -914,7 +915,7 @@ export function AssetDetailPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">格式</label>
                   <div className="text-xs text-gray-500 px-2 py-1.5 bg-gray-50 rounded-lg border border-gray-200">
-                    {(material?.metadata?.format as string) || '—'}
+                    {material?.metadata?.format || '—'}
                   </div>
                 </div>
               </div>
@@ -930,7 +931,7 @@ export function AssetDetailPage() {
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">页数</label>
                   <div className="text-xs text-gray-500 px-2 py-1.5 bg-gray-50 rounded-lg border border-gray-200">
-                    {(material?.metadata?.pages as string) || '—'}
+                    {material?.metadata?.pages || '—'}
                   </div>
                 </div>
               </div>
@@ -988,7 +989,7 @@ export function AssetDetailPage() {
             {material?.metadata?.summary && (
               <div className="mt-3 pt-3 border-t border-gray-100">
                 <p className="text-xs text-gray-400 mb-1">摘要</p>
-                <p className="text-xs text-gray-600 leading-relaxed">{material.metadata.summary as string}</p>
+                <p className="text-xs text-gray-600 leading-relaxed">{material.metadata.summary}</p>
               </div>
             )}
           </div>

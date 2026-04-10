@@ -17,7 +17,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     // ==================== DB Hydration ====================
 
     /**
-     * 从 SQLite 全量覆盖内存状态（仅在应用启动时触发一次）
+     * 从 db-server 全量覆盖内存状态（仅在应用启动时触发一次）
      * 只覆盖 payload 中非 undefined 的字段
      */
     case 'HYDRATE_FROM_DB': {
@@ -52,6 +52,10 @@ export function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         materials: state.materials.filter((m) => !idSet.has(m.id)),
         assetDetails: newAssetDetails,
+        // 级联清理关联的处理任务（孤儿任务防护：无 materialId 的任务保留）
+        processTasks: state.processTasks.filter(
+          (t) => t.materialId === undefined || !idSet.has(t.materialId),
+        ),
       };
     }
 
@@ -114,7 +118,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
               ...(updates.status !== undefined ? { status: updates.status } : {}),
               ...(updates.tags !== undefined ? { tags: updates.tags } : {}),
               ...(updates.metadata
-                ? { metadata: { ...existingDetail.metadata, ...updates.metadata } }
+                ? { metadata: { ...existingDetail.metadata, ...updates.metadata } as Record<string, string | number> }
                 : {}),
             },
           }
@@ -269,7 +273,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
               ...state.assetDetails,
               [materialId]: {
                 ...state.assetDetails[materialId],
-                status: 'completed',
+                status: 'completed' as const,
               },
             }
           : state.assetDetails;

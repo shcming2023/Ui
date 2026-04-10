@@ -924,6 +924,84 @@ async function loadPersistedConfig() {
   }
 }
 
+// ─── 辅助：列出桶内指定前缀下的所有对象 ──────────────────────
+async function listAllObjects(bucket, prefix) {
+  return new Promise((resolve, reject) => {
+    const objects = [];
+    const stream = getMinioClient().listObjectsV2(bucket, prefix, true);
+    stream.on('data', (obj) => { if (obj.name) objects.push(obj); });
+    stream.on('end', () => resolve(objects));
+    stream.on('error', reject);
+  });
+}
+
+// ─── 接口：POST /delete-material ──────────────────────────────
+// 清理指定 material 列表在 MinIO 中的所有原始文件和解析产物
+// 新格式 Body: { materialIds: number[], materials: { id: number, metadata: { provider?, objectName?, ... } }[] }
+// 旧格式 Body: { materialIds: number[] }（向后兼容：降级为全局 storageBackend 判断）
+app.post('/delete-material', async (req, res) => {
+  const { materialIds, materials } = req.body;
+  if (!Array.isArray(materialIds) || materialIds.length === 0) {
+    res.status(400).json({ error: '缺少 materialIds 数组' }); return;
+  }
+
+  // ── 旧格式兼容：没有传 materials 时，降级为原来的全局 storageBackend 判断 ──
+  if (!Array.isArray(materials) || materials.length === 0) {
+    if (getStorageBackend() !== 'minio') {
+      res.json({ ok: true, skipped: true, reason: 'non-minio backend (legacy mode)' }); return;
+    }
+    const results = [];
+    const errors = [];
+    for (const id of materialIds) {
+      try {
+        const rawBucket = getMinioBucket();
+        const parsedBucket = getParsedBucket();
+        const [originals, parsed] = await Promise.all([
+          listAllObjects(rawBucket, `originals/${id}/`),
+          listAllObjects(parsedBucket, `parsed/${id}/`),
+        ]);
+        await Promise.all([
+          ...originals.map((o) => getMinioClient().removeObject(rawBucket, o.name)),
+          ...parsed.map((o) => getMinioClient().removeObject(parsedBucket, o.name)),
+        ]);
+        results.push({ id, originals: originals.length, parsed: parsed.length });
+      } catch (err) {
+        errors.push({ id, error: err.message });
+      }
+    }
+    res.json({ ok: true, results, errors }); return;
+  }
+
+  // ── 新格式：按每条 material 自身的 metadata.provider 决定是否清理 MinIO ──
+  const results = [];
+  const errors = [];
+  for (const m of materials) {
+    const id = m.id;
+    const provider = m.metadata?.provider;
+    try {
+      if (provider !== 'minio') {
+        // 非 minio 存储的资料，直接跳过，不报错
+        results.push({ id, skipped: true, reason: `provider is '${provider ?? 'unknown'}'` });
+        continue;
+      }
+      const rawBucket = getMinioBucket();
+      const parsedBucket = getParsedBucket();
+      const [originals, parsed] = await Promise.all([
+        listAllObjects(rawBucket, `originals/${id}/`),
+        listAllObjects(parsedBucket, `parsed/${id}/`),
+      ]);
+      await Promise.all([
+        ...originals.map((o) => getMinioClient().removeObject(rawBucket, o.name)),
+        ...parsed.map((o) => getMinioClient().removeObject(parsedBucket, o.name)),
+      ]);
+      results.push({ id, originals: originals.length, parsed: parsed.length });
+    } catch (err) {
+      errors.push({ id, error: err.message });
+    }
+  }
+  res.json({ ok: true, results, errors });
+});
+
 app.listen(port, async () => {
   console.log(`[upload-server] listening on http://localhost:${port}`);
   await loadPersistedConfig();
