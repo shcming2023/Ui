@@ -161,6 +161,12 @@ function extractLocalMarkdown(payload) {
   if (typeof payload === 'string') return payload.trim();
   if (!payload || typeof payload !== 'object') return '';
 
+  if (payload.results && typeof payload.results === 'object') {
+    const firstKey = Object.keys(payload.results)[0];
+    const md = firstKey ? payload.results?.[firstKey]?.md_content : '';
+    if (typeof md === 'string' && md.trim() !== '') return md.trim();
+  }
+
   if (Array.isArray(payload) && payload.length > 0 && typeof payload[0]?.text === 'string') {
     return payload[0].text.trim();
   }
@@ -208,6 +214,206 @@ async function objectExists(bucket, objectName) {
   } catch {
     return false;
   }
+}
+
+const gradioInfoCache = new Map();
+
+async function fetchGradioInfo(localEndpoint) {
+  const cacheKey = String(localEndpoint || '');
+  const cached = gradioInfoCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < 60_000) return cached.data;
+
+  const response = await fetch(`${localEndpoint}/gradio_api/info`, {
+    signal: AbortSignal.timeout(5000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`读取 Gradio info 失败: HTTP ${response.status} ${detail.slice(0, 200)}`);
+  }
+  const data = await response.json();
+  gradioInfoCache.set(cacheKey, { cachedAt: Date.now(), data });
+  return data;
+}
+
+async function resolveGradioOcrLanguage(localEndpoint, rawLanguage) {
+  const fallback = 'ch (Chinese, English, Chinese Traditional)';
+  const lang = String(rawLanguage || '').trim();
+  if (!lang) return fallback;
+
+  try {
+    const info = await fetchGradioInfo(localEndpoint);
+    const endpoint = info?.named_endpoints?.['/to_markdown'];
+    const langParam = endpoint?.parameters?.find((p) => p.parameter_name === 'language');
+    const options = Array.isArray(langParam?.type?.enum) ? langParam.type.enum : [];
+    if (options.includes(lang)) return lang;
+    const byPrefix = options.find((opt) => typeof opt === 'string' && opt.startsWith(`${lang} `));
+    if (byPrefix) return byPrefix;
+  } catch {
+  }
+
+  if (lang === 'en') return 'en (English)';
+  if (lang === 'ch' || lang === 'zh') return fallback;
+  return fallback;
+}
+
+async function uploadFileToGradio(localEndpoint, buffer, fileName, mimeType, timeoutMs) {
+  const form = new FormData();
+  form.append('files', new Blob([buffer], { type: mimeType || 'application/octet-stream' }), fileName || 'upload.bin');
+  const response = await fetch(`${localEndpoint}/gradio_api/upload`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`Gradio upload 失败: HTTP ${response.status} ${detail.slice(0, 200)}`);
+  }
+  const payload = await response.json().catch(() => null);
+  const filePath = Array.isArray(payload) ? payload[0] : '';
+  if (!filePath) throw new Error('Gradio upload 未返回文件路径');
+  return String(filePath);
+}
+
+async function readSseFinalData(response, timeoutMs) {
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+    throw new Error(`SSE 订阅失败: HTTP ${response.status} ${detail.slice(0, 200)}`);
+  }
+  if (!response.body) throw new Error('SSE 响应缺少 body');
+
+  const reader = response.body.getReader();
+  const start = Date.now();
+  let buffer = '';
+  while (Date.now() - start < timeoutMs) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += Buffer.from(value).toString('utf8');
+
+    let splitIndex = buffer.indexOf('\n\n');
+    while (splitIndex >= 0) {
+      const block = buffer.slice(0, splitIndex);
+      buffer = buffer.slice(splitIndex + 2);
+      splitIndex = buffer.indexOf('\n\n');
+
+      const lines = block.split('\n');
+      let eventName = '';
+      let dataValue = '';
+      for (const line of lines) {
+        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+        if (line.startsWith('data:')) dataValue += line.slice(5).trim();
+      }
+
+      if (eventName === 'error') {
+        throw new Error(`Gradio 解析失败: ${dataValue || 'unknown error'}`);
+      }
+      if (eventName === 'complete') {
+        return dataValue;
+      }
+    }
+  }
+
+  throw new Error('Gradio 解析超时（未收到 complete 事件）');
+}
+
+async function callGradioToMarkdown(localEndpoint, fileBuffer, fileName, mimeType, params) {
+  const timeoutMs = Math.max(Number(params?.timeoutMs || 30_000), 30_000);
+  const uploadedPath = await uploadFileToGradio(localEndpoint, fileBuffer, fileName, mimeType, timeoutMs);
+  const language = await resolveGradioOcrLanguage(localEndpoint, params?.ocrLanguage);
+
+  const data = [
+    { path: uploadedPath, orig_name: fileName, mime_type: mimeType, meta: { _type: 'gradio.FileData' } },
+    Number(params?.maxPages || 1000),
+    Boolean(params?.enableOcr),
+    Boolean(params?.enableFormula),
+    Boolean(params?.enableTable),
+    language,
+    String(params?.backend || 'hybrid-auto-engine'),
+    String(params?.serverUrl || 'http://localhost:30000'),
+  ];
+
+  const callResp = await fetch(`${localEndpoint}/gradio_api/call/to_markdown`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const callPayload = await callResp.json().catch(() => null);
+  if (!callResp.ok) {
+    throw new Error(`Gradio call 失败: HTTP ${callResp.status} ${(callPayload?.detail || '').slice(0, 200)}`);
+  }
+  const eventId = callPayload?.event_id;
+  if (!eventId) throw new Error('Gradio call 未返回 event_id');
+
+  const sseResp = await fetch(`${localEndpoint}/gradio_api/call/to_markdown/${eventId}`, {
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const finalData = await readSseFinalData(sseResp, timeoutMs);
+  let result;
+  try {
+    result = JSON.parse(finalData);
+  } catch {
+    result = finalData;
+  }
+
+  const fileData = Array.isArray(result) ? result[1] : result?.data?.[1] || result?.[1] || null;
+  const fileUrl = fileData?.url;
+  const filePath = fileData?.path;
+
+  let downloadUrl = '';
+  if (typeof fileUrl === 'string' && fileUrl) {
+    downloadUrl = fileUrl.startsWith('http') ? fileUrl : `${localEndpoint}${fileUrl.startsWith('/') ? '' : '/'}${fileUrl}`;
+  } else if (typeof filePath === 'string' && filePath) {
+    downloadUrl = `${localEndpoint}/gradio_api/file=${encodeURIComponent(filePath)}`;
+  } else {
+    throw new Error('Gradio 未返回可下载的 Markdown 文件');
+  }
+
+  const mdResp = await fetch(downloadUrl, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!mdResp.ok) {
+    const detail = await mdResp.text().catch(() => '');
+    throw new Error(`下载 Markdown 失败: HTTP ${mdResp.status} ${detail.slice(0, 200)}`);
+  }
+  return mdResp.text();
+}
+
+async function waitMinerUTask(localEndpoint, taskId, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const response = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(taskId)}`, {
+      signal: AbortSignal.timeout(Math.min(10_000, timeoutMs)),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      const detail = typeof payload?.detail === 'string' ? payload.detail : '';
+      throw new Error(`查询任务状态失败: HTTP ${response.status} ${detail}`.trim());
+    }
+
+    const status = String(payload?.status || '').toLowerCase();
+    if (status === 'done' || status === 'success' || status === 'completed') return payload;
+    if (status === 'failed' || status === 'error') {
+      throw new Error(String(payload?.error || payload?.message || '任务执行失败'));
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  throw new Error('等待 MinerU 任务超时');
+}
+
+async function fetchMinerUResult(localEndpoint, taskId, timeoutMs) {
+  const response = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(taskId)}/result`, {
+    signal: AbortSignal.timeout(Math.min(30_000, timeoutMs)),
+  });
+  const contentType = response.headers.get('content-type') || '';
+  const payload = contentType.includes('application/json')
+    ? await response.json().catch(() => null)
+    : await response.text().catch(() => '');
+  if (!response.ok) {
+    const detail = typeof payload === 'string'
+      ? payload
+      : String(payload?.detail || payload?.error || payload?.message || '');
+    throw new Error(`获取任务结果失败: HTTP ${response.status} ${detail}`.trim());
+  }
+  return payload;
 }
 
 async function fetchDbBackupSnapshot() {
@@ -584,6 +790,7 @@ app.post('/parse/local-mineru/health', async (req, res) => {
   }
 
   const candidates = [
+    `${localEndpoint}/health`,
     localEndpoint,
     `${localEndpoint}/gradio_api/info`,
   ];
@@ -798,48 +1005,124 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
   }
 
   try {
-    const form = new FormData();
     const backend = String(req.body?.backend || 'hybrid-auto-engine');
     const maxPages = Number(req.body?.maxPages || 1000);
     const ocrLanguage = String(req.body?.ocrLanguage || req.body?.language || 'ch');
     const enableOcr = isEnabledFlag(req.body?.enableOcr);
     const enableFormula = isEnabledFlag(req.body?.enableFormula);
     const enableTable = isEnabledFlag(req.body?.enableTable);
+    const timeoutMs = Math.max(localTimeout * 1000, 30_000);
 
-    form.append(
-      'file',
+    let markdown = '';
+
+    const fastApiForm = new FormData();
+    fastApiForm.append(
+      'files',
       new Blob([req.file.buffer], { type: req.file.mimetype || 'application/octet-stream' }),
       req.file.originalname,
     );
-    form.append('backend', backend);
-    form.append('max_pages', String(maxPages));
-    form.append('ocr_language', ocrLanguage);
-    form.append('table_enable', String(enableTable));
-    form.append('formula_enable', String(enableFormula));
-    form.append('language', req.body?.language || ocrLanguage);
-    form.append('enableOcr', String(enableOcr));
-    form.append('enableFormula', String(enableFormula));
-    form.append('enableTable', String(enableTable));
-    form.append('enable_ocr', String(enableOcr));
-    form.append('enable_formula', String(enableFormula));
-    form.append('enable_table', String(enableTable));
-
-    const response = await fetch(`${localEndpoint}/gradio_api/to_markdown`, {
-      method: 'POST',
-      body: form,
-      signal: AbortSignal.timeout(Math.max(localTimeout * 1000, 30_000)),
-    });
-
-    if (!response.ok) {
-      const detail = await response.text();
-      throw new Error(`本地 MinerU 返回 HTTP ${response.status}: ${detail.slice(0, 300)}`);
+    fastApiForm.append('backend', backend);
+    for (const lang of String(ocrLanguage || 'ch').split(',').map((item) => item.trim()).filter(Boolean)) {
+      fastApiForm.append('lang_list', lang);
+    }
+    fastApiForm.append('formula_enable', String(enableFormula));
+    fastApiForm.append('table_enable', String(enableTable));
+    fastApiForm.append('return_md', 'true');
+    fastApiForm.append('response_format_zip', 'false');
+    fastApiForm.append('is_ocr', String(enableOcr));
+    if (Number.isFinite(maxPages) && maxPages > 0) {
+      fastApiForm.append('end_page_id', String(Math.max(0, Math.floor(maxPages) - 1)));
     }
 
-    const contentType = response.headers.get('content-type') || '';
-    const payload = contentType.includes('application/json')
-      ? await response.json()
-      : await response.text();
-    const markdown = extractLocalMarkdown(payload);
+    const fastApiResponse = await fetch(`${localEndpoint}/file_parse`, {
+      method: 'POST',
+      body: fastApiForm,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (fastApiResponse.status !== 404 && fastApiResponse.status !== 405) {
+      const contentType = fastApiResponse.headers.get('content-type') || '';
+      const payload = contentType.includes('application/json')
+        ? await fastApiResponse.json().catch(() => null)
+        : await fastApiResponse.text().catch(() => '');
+
+      if (!fastApiResponse.ok) {
+        const taskId = payload?.task_id;
+        const status = String(payload?.status || '').toLowerCase();
+        const error = String(payload?.error || payload?.message || payload?.detail || '');
+        if (taskId && (status === 'failed' || status === 'error')) {
+          const message = /hub|snapshot folder|huggingface/i.test(error)
+            ? `本地 MinerU 任务失败（可能无法下载模型，请检查网络/镜像或预下载模型）: ${error}`
+            : `本地 MinerU 任务失败: ${error}`;
+          throw new Error(message.trim());
+        }
+        if (taskId && (status === 'queued' || status === 'processing' || status === 'running')) {
+          const finished = await waitMinerUTask(localEndpoint, taskId, timeoutMs);
+          const resultPayload = await fetchMinerUResult(localEndpoint, taskId, timeoutMs);
+          markdown = extractLocalMarkdown(resultPayload) || extractLocalMarkdown(finished);
+        } else {
+          throw new Error(`本地 MinerU 返回 HTTP ${fastApiResponse.status}: ${error || JSON.stringify(payload).slice(0, 300)}`);
+        }
+      } else if (payload?.task_id) {
+        const taskId = String(payload.task_id);
+        const status = String(payload?.status || '').toLowerCase();
+        if (status && status !== 'done' && status !== 'success' && status !== 'completed') {
+          await waitMinerUTask(localEndpoint, taskId, timeoutMs);
+        }
+        const resultPayload = await fetchMinerUResult(localEndpoint, taskId, timeoutMs);
+        markdown = extractLocalMarkdown(resultPayload) || extractLocalMarkdown(payload);
+      } else {
+        markdown = extractLocalMarkdown(payload);
+      }
+    } else {
+      const form = new FormData();
+      form.append(
+        'file',
+        new Blob([req.file.buffer], { type: req.file.mimetype || 'application/octet-stream' }),
+        req.file.originalname,
+      );
+      form.append('backend', backend);
+      form.append('max_pages', String(maxPages));
+      form.append('ocr_language', ocrLanguage);
+      form.append('table_enable', String(enableTable));
+      form.append('formula_enable', String(enableFormula));
+      form.append('language', req.body?.language || ocrLanguage);
+      form.append('enableOcr', String(enableOcr));
+      form.append('enableFormula', String(enableFormula));
+      form.append('enableTable', String(enableTable));
+      form.append('enable_ocr', String(enableOcr));
+      form.append('enable_formula', String(enableFormula));
+      form.append('enable_table', String(enableTable));
+
+      const response = await fetch(`${localEndpoint}/gradio_api/to_markdown`, {
+        method: 'POST',
+        body: form,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+
+      if (!response.ok && response.status !== 404) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(`本地 MinerU 返回 HTTP ${response.status}: ${detail.slice(0, 300)}`);
+      }
+
+      if (response.ok) {
+        const contentType = response.headers.get('content-type') || '';
+        const payload = contentType.includes('application/json')
+          ? await response.json()
+          : await response.text();
+        markdown = extractLocalMarkdown(payload);
+      } else {
+        markdown = await callGradioToMarkdown(localEndpoint, req.file.buffer, req.file.originalname, req.file.mimetype, {
+          backend,
+          maxPages,
+          ocrLanguage,
+          enableOcr,
+          enableFormula,
+          enableTable,
+          timeoutMs,
+        });
+      }
+    }
 
     if (!markdown) {
       throw new Error('本地 MinerU 未返回 Markdown 内容');
