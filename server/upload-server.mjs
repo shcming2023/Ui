@@ -1429,6 +1429,11 @@ ${mdSnippet}
       const retryAfterRaw = aiResp.headers.get('retry-after');
       const retryAfterSec = retryAfterRaw && Number.isFinite(Number(retryAfterRaw)) ? Number(retryAfterRaw) : undefined;
       const errText = await aiResp.text().catch(() => '');
+      console.error('[upload-server] AI upstream error:', {
+        status: aiResp.status,
+        retryAfterSec: retryAfterSec ?? null,
+        bodySnippet: errText.slice(0, 300),
+      });
       const errLower = errText.toLowerCase();
       const isInsufficient =
         errLower.includes('insufficient') ||
