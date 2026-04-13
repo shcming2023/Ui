@@ -94,7 +94,7 @@ export const initialAiConfig: AiConfig = {
 export const initialMinerUConfig: MinerUConfig = {
   engine: 'local',
   localEndpoint: 'http://192.168.31.33:8083',
-  localTimeout: 300,
+  localTimeout: 3600,
   localBackend: 'hybrid-auto-engine',
   localMaxPages: 1000,
   localOcrLanguage: 'ch',

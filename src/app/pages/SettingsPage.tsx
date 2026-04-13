@@ -84,6 +84,33 @@ function Input({
   );
 }
 
+function Select({
+  value,
+  onChange,
+  options,
+  disabled = false,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: Array<{ value: string; label: string }>;
+  disabled?: boolean;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300 disabled:bg-gray-50 disabled:text-gray-400"
+    >
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>
+          {opt.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 function Textarea({
   value,
   onChange,
@@ -624,11 +651,15 @@ export function SettingsPage() {
                     onChange={(v) => updateMineru({ localTimeout: Number(v) })}
                   />
                 </FieldRow>
-                <FieldRow label="backend">
-                  <Input
-                    value={mineruForm.localBackend}
+                <FieldRow label="解析引擎选择">
+                  <Select
+                    value={mineruForm.localBackend || 'hybrid-auto-engine'}
                     onChange={(v) => updateMineru({ localBackend: v })}
-                    placeholder="hybrid-auto-engine"
+                    options={[
+                      { value: 'hybrid-auto-engine', label: 'hybrid-auto-engine（推荐）' },
+                      { value: 'vlm-auto-engine', label: 'vlm-auto-engine（高精度/耗时）' },
+                      { value: 'pipeline', label: 'pipeline（更快）' },
+                    ]}
                   />
                 </FieldRow>
                 <FieldRow label="max_pages">

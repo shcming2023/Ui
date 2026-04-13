@@ -7,6 +7,7 @@ import {
   RotateCcw,
   AlertCircle,
   CheckCircle2,
+  Loader,
   File as FileIcon,
   Folder,
   Trash2,
@@ -55,6 +56,16 @@ function formatAgo(ts: number) {
   if (min < 60) return `${min}min 前`;
   const hr = Math.floor(min / 60);
   return `${hr}h 前`;
+}
+
+function formatClock(ms: number) {
+  if (!Number.isFinite(ms) || ms <= 0) return '00:00';
+  const totalSec = Math.floor(ms / 1000);
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  const mm = String(min).padStart(2, '0');
+  const ss = String(sec).padStart(2, '0');
+  return `${mm}:${ss}`;
 }
 
 function clampPct(pct: number) {
@@ -303,6 +314,7 @@ export function BatchProcessingController() {
         }
 
         updateItem(item.id, { status: 'mineru', progress: 40, message: '正在解析文件（MinerU）...' });
+        updateItem(item.id, { mineruStartedAt: Date.now() });
         updateMaterialProgress('mineru', '正在解析文件（MinerU）...', 40);
         dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: newId, mineruStatus: 'processing' } });
 
@@ -447,7 +459,12 @@ export function BatchProcessingController() {
 
         if (!aiRes.ok) {
           const errData = await aiRes.json().catch(() => ({ error: `HTTP ${aiRes.status}` }));
-          throw new Error(errData.error || `HTTP ${aiRes.status}`);
+          const errorType = String((errData as { errorType?: string } | null)?.errorType || '');
+          if (aiRes.status === 429 || errorType === 'INSUFFICIENT_BALANCE' || errorType === 'RATE_LIMIT') {
+            dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: true } });
+            dispatch({ type: 'BATCH_SET_OPTIONS', payload: { autoAI: false } });
+          }
+          throw new Error((errData as { error?: string } | null)?.error || `HTTP ${aiRes.status}`);
         }
 
         const aiData = await aiRes.json();
@@ -515,8 +532,12 @@ export function BatchProcessingController() {
               },
             },
           });
-          dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: materialId, aiStatus: 'failed' } });
-          dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: materialId, mineruStatus: 'failed', mineruCompletedAt: Date.now() } });
+          if (stage === 'ai') {
+            dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: materialId, aiStatus: 'failed' } });
+          } else {
+            dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: materialId, aiStatus: 'failed' } });
+            dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: materialId, mineruStatus: 'failed', mineruCompletedAt: Date.now() } });
+          }
         }
       }
     };
@@ -537,6 +558,15 @@ export function BatchUploadModal() {
 
   const isProcessing = bp.running && !bp.paused;
   const [diagRunning, setDiagRunning] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!bp.uiOpen) return;
+    const hasMinerURunning = items.some((it) => it.status === 'mineru');
+    if (!hasMinerURunning) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [bp.uiOpen, items]);
 
   const runDiagnostics = async () => {
     if (diagRunning) return;
@@ -596,7 +626,7 @@ export function BatchUploadModal() {
   };
 
   const handleRetry = (id: string) => {
-    dispatch({ type: 'BATCH_UPDATE_ITEM', payload: { id, updates: { status: 'pending', progress: 0, message: '等待重试...' } } });
+    dispatch({ type: 'BATCH_UPDATE_ITEM', payload: { id, updates: { status: 'pending', progress: 0, message: '等待重试...', mineruStartedAt: undefined } } });
     dispatch({ type: 'BATCH_SET_RUNNING', payload: { running: true } });
     dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: false } });
   };
@@ -692,8 +722,18 @@ export function BatchUploadModal() {
               <p>暂无文件，请先在「原始资料」中选择文件或文件夹</p>
             </div>
           ) : (
-            items.map((item) => (
-              <div key={item.id} className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm flex flex-col gap-2">
+            items.map((item) => {
+              const isMinerURunning = item.status === 'mineru';
+              const mineruLimitSec =
+                state.mineruConfig.engine === 'local'
+                  ? Number(state.mineruConfig.localTimeout || 0)
+                  : Number(state.mineruConfig.timeout || 0);
+              const elapsedMs = isMinerURunning
+                ? Math.max(0, now - (item.mineruStartedAt || item.updatedAt))
+                : 0;
+
+              return (
+                <div key={item.id} className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm flex flex-col gap-2">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3 overflow-hidden">
                     <FileIcon size={20} className="text-gray-400 flex-shrink-0" />
@@ -723,35 +763,47 @@ export function BatchUploadModal() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-3">
-                  <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
-                    <div
-                      className={`h-full transition-all duration-300 ${
-                        item.status === 'error'
-                          ? 'bg-red-500'
-                          : item.status === 'completed'
-                            ? 'bg-green-500'
-                            : item.status === 'skipped'
-                              ? 'bg-gray-400'
-                              : 'bg-blue-500'
-                      }`}
-                      style={{ width: `${Math.max(0, Math.min(100, item.progress))}%` }}
-                    />
+                {isMinerURunning ? (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-xs text-gray-600">
+                      <Loader size={14} className="animate-spin" />
+                      <span>正在执行深度解析...</span>
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      已耗时: {formatClock(elapsedMs)}{mineruLimitSec > 0 ? ` / 限额: ${formatClock(mineruLimitSec * 1000)}` : ''}
+                    </div>
                   </div>
-                  <div className="w-24 text-right">
-                    {item.status === 'error' ? (
-                      <span className="flex items-center justify-end gap-1 text-xs text-red-600">
-                        <AlertCircle size={12} /> 出错
-                      </span>
-                    ) : item.status === 'completed' ? (
-                      <span className="flex items-center justify-end gap-1 text-xs text-green-600">
-                        <CheckCircle2 size={12} /> 完成
-                      </span>
-                    ) : (
-                      <span className="text-xs text-gray-500">{clampPct(item.progress).toFixed(0)}%</span>
-                    )}
+                ) : (
+                  <div className="flex items-center gap-3">
+                    <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full transition-all duration-300 ${
+                          item.status === 'error'
+                            ? 'bg-red-500'
+                            : item.status === 'completed'
+                              ? 'bg-green-500'
+                              : item.status === 'skipped'
+                                ? 'bg-gray-400'
+                                : 'bg-blue-500'
+                        }`}
+                        style={{ width: `${Math.max(0, Math.min(100, item.progress))}%` }}
+                      />
+                    </div>
+                    <div className="w-24 text-right">
+                      {item.status === 'error' ? (
+                        <span className="flex items-center justify-end gap-1 text-xs text-red-600">
+                          <AlertCircle size={12} /> 出错
+                        </span>
+                      ) : item.status === 'completed' ? (
+                        <span className="flex items-center justify-end gap-1 text-xs text-green-600">
+                          <CheckCircle2 size={12} /> 完成
+                        </span>
+                      ) : (
+                        <span className="text-xs text-gray-500">{clampPct(item.progress).toFixed(0)}%</span>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {item.message && (
                   <p className={`text-xs truncate ${item.status === 'error' ? 'text-red-500' : 'text-gray-500'}`} title={item.message}>
@@ -759,7 +811,8 @@ export function BatchUploadModal() {
                   </p>
                 )}
               </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>

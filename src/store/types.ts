@@ -106,6 +106,7 @@ export interface BatchQueueItem {
   progress: number;
   message?: string;
   materialId?: number;
+  mineruStartedAt?: number;
   createdAt: number;
   updatedAt: number;
 }

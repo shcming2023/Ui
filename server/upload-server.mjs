@@ -1426,8 +1426,42 @@ ${mdSnippet}
     clearTimeout(aiTimer);
 
     if (!aiResp.ok) {
-      const errText = await aiResp.text();
-      throw new Error(`AI API 调用失败: HTTP ${aiResp.status} — ${errText.slice(0, 200)}`);
+      const retryAfterRaw = aiResp.headers.get('retry-after');
+      const retryAfterSec = retryAfterRaw && Number.isFinite(Number(retryAfterRaw)) ? Number(retryAfterRaw) : undefined;
+      const errText = await aiResp.text().catch(() => '');
+      const errLower = errText.toLowerCase();
+      const isInsufficient =
+        errLower.includes('insufficient') ||
+        errLower.includes('quota') ||
+        errLower.includes('balance') ||
+        errLower.includes('billing') ||
+        errLower.includes('suspended');
+
+      const errorType =
+        aiResp.status === 429 && isInsufficient
+          ? 'INSUFFICIENT_BALANCE'
+          : aiResp.status === 429
+            ? 'RATE_LIMIT'
+            : aiResp.status === 401 || aiResp.status === 403
+              ? 'AUTH'
+              : 'UPSTREAM_ERROR';
+
+      const message =
+        errorType === 'INSUFFICIENT_BALANCE'
+          ? 'AI 账号余额不足或已被停用，请充值或更换可用的 API Key'
+          : errorType === 'RATE_LIMIT'
+            ? 'AI 服务触发限流（HTTP 429），请稍后重试'
+            : errorType === 'AUTH'
+              ? 'AI API Key 无效或无权限（HTTP 401/403），请检查系统设置'
+              : `AI API 调用失败: HTTP ${aiResp.status}`;
+
+      res.status(aiResp.status).json({
+        error: message,
+        errorType,
+        upstreamStatus: aiResp.status,
+        ...(retryAfterSec != null ? { retryAfterSec } : {}),
+      });
+      return;
     }
 
     const aiJson = await aiResp.json();
