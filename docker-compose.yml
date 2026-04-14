@@ -35,7 +35,7 @@ services:
     ports:
       # 宿主机端口:容器端口
       # 修改左侧端口号以适配 Mac Mini 的实际监听端口
-      - "${CMS_PORT:-8080}:80"
+      - "0.0.0.0:${CMS_PORT:-8080}:80"
     depends_on:
       upload-server:
         condition: service_healthy
@@ -80,6 +80,9 @@ services:
       - MINIO_BUCKET=${MINIO_BUCKET:-eduassets}
       # Presigned URL 有效期（秒），默认 1 小时；生产环境建议适当延长
       - MINIO_PRESIGNED_EXPIRY=${MINIO_PRESIGNED_EXPIRY:-3600}
+      # 局域网/生产部署：设置此变量让浏览器可访问 MinIO 文件
+      # 格式：http://<宿主机IP>:<CMS_PORT>/minio
+      - MINIO_PUBLIC_ENDPOINT=${MINIO_PUBLIC_ENDPOINT:-}
       - TZ=Asia/Shanghai
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8788/health"]
@@ -122,14 +125,14 @@ services:
     image: minio/minio:latest
     container_name: cms-minio
     restart: unless-stopped
-    # 生产环境：注释掉以下 ports 配置，仅通过内部网络访问
+    # 生产/UAT 环境：9000 仅内部访问，通过 Nginx /minio/ 代理对外暴露
+    # 如需直接访问 MinIO API，可临时取消注释下方端口映射
     # ports:
-    #   - "9000:9000"  # API 端口
-    #   - "9001:9001"  # Web 控制台端口
-    # 开发环境：如需本地调试，可取消注释端口映射
+    #   - "9000:9000"  # API 端口（通过 Nginx /minio/ 代理访问，无需直接暴露）
+    #   - "19001:9001"  # Web 控制台端口
+    # UAT/开发环境：开启 9001 控制台端口，方便检查存储状态
     ports:
-      - "9000:9000"  # API 端口（仅开发环境）
-      - "9001:9001"  # Web 控制台端口（仅开发环境）
+      - "19001:9001"  # MinIO Web 控制台（UAT 调试用）
     networks:
       - cms-network
     environment:

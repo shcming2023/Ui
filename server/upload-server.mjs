@@ -56,6 +56,24 @@ app.use((req, res, next) => {
   next();
 });
 
+// ─── MinIO Presigned URL 公开地址重写 ─────────────────────────
+// 当配置了 MINIO_PUBLIC_ENDPOINT（如 http://192.168.31.33:8081/minio）时，
+// 将 MinIO SDK 生成的内部预签名 URL（http://minio:9000/...）替换为可被
+// 局域网浏览器直接访问的公开地址，通过 Nginx /minio/ 反向代理透传。
+// 未配置时原样返回（向后兼容本地开发环境）。
+const MINIO_PUBLIC_ENDPOINT = (process.env.MINIO_PUBLIC_ENDPOINT || '').replace(/\/$/, '');
+
+/**
+ * 将 MinIO 内部预签名 URL 重写为外部可访问的公开地址。
+ * @param {string} url - MinIO SDK presignedGetObject 返回的原始 URL
+ * @returns {string} 替换主机+端口后的公开 URL，或原始 URL（未配置时）
+ */
+function rewritePresignedUrl(url) {
+  if (!MINIO_PUBLIC_ENDPOINT || !url) return url;
+  // 匹配 http(s)://hostname:port 或 http(s)://hostname（不含端口）
+  return url.replace(/^https?:\/\/[^/?#]+/, MINIO_PUBLIC_ENDPOINT);
+}
+
 // ─── MinIO 动态配置（可在运行时通过 /settings/storage 接口更新）─
 let minioState = {
   storageBackend: process.env.STORAGE_BACKEND || 'tmpfiles',
@@ -532,11 +550,11 @@ async function uploadBufferToMinIO(buffer, mimeType, prefix, fileName, retries =
         { 'Content-Type': mimeType || 'application/octet-stream' },
       );
 
-      const presignedUrl = await client.presignedGetObject(
+      const presignedUrl = rewritePresignedUrl(await client.presignedGetObject(
         bucket,
         objectName,
         getPresignedExpiry(),
-      );
+      ));
 
       console.log(`[upload-server] MinIO put: ${objectName}`);
       return { objectName, presignedUrl };
@@ -671,7 +689,7 @@ app.get('/presign', async (req, res) => {
   }
 
   try {
-    const url = await getMinioClient().presignedGetObject(getMinioBucket(), objectName, getPresignedExpiry());
+    const url = rewritePresignedUrl(await getMinioClient().presignedGetObject(getMinioBucket(), objectName, getPresignedExpiry()));
     res.json({ url, objectName, expiresIn: getPresignedExpiry() });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -798,7 +816,7 @@ app.post('/parse/download', async (req, res) => {
           const bucket = getParsedBucket();
           const objectName = `${prefix}/${name}`;
           await client.putObject(bucket, objectName, content, content.length, { 'Content-Type': mimeType });
-          const presignedUrl = await client.presignedGetObject(bucket, objectName, getPresignedExpiry());
+          const presignedUrl = rewritePresignedUrl(await client.presignedGetObject(bucket, objectName, getPresignedExpiry()));
           uploadedFiles.push({ objectName, presignedUrl, name });
           if (isMd && (name === 'full.md' || name.endsWith('/full.md'))) {
             markdownObjectName = objectName;
@@ -1251,7 +1269,7 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
       const markdownBuffer = Buffer.from(markdown, 'utf-8');
       await client.putObject(bucket, objectName, markdownBuffer, markdownBuffer.length, { 'Content-Type': 'text/markdown; charset=utf-8' });
       markdownObjectName = objectName;
-      markdownUrl = await client.presignedGetObject(bucket, objectName, getPresignedExpiry());
+      markdownUrl = rewritePresignedUrl(await client.presignedGetObject(bucket, objectName, getPresignedExpiry()));
     } catch (storageError) {
       console.warn('[upload-server] local MinerU markdown store failed:', storageError.message);
     }
@@ -1707,7 +1725,7 @@ app.get('/list', async (req, res) => {
       objects.map(async (obj) => {
         let presignedUrl = '';
         try {
-          presignedUrl = await client.presignedGetObject(bucket, obj.name, getPresignedExpiry());
+          presignedUrl = rewritePresignedUrl(await client.presignedGetObject(bucket, obj.name, getPresignedExpiry()));
         } catch (e) {
           console.warn(`[upload-server] presign failed for ${obj.name}:`, e.message);
         }

@@ -1,0 +1,96 @@
+# EduAsset CMS (Luceon2026) 深度代码评审与稳定性分析报告
+
+## 一、评审概述
+
+本次评审针对 `shcming2023/Luceon2026` 仓库（v0.6.1）进行了全面的代码阅读与架构分析。评审的核心目标是评估当前项目的**稳定性与健壮性**，以确保其能够长期持续、反复地执行教育资产处理任务。
+
+在独立分析的基础上，本报告与用户提供的《独立报告》进行了交叉对比与事实核查。总体而言，独立报告对项目的技术栈、架构优点及部分表面问题（如单文件过大、缺少测试、敏感信息硬编码）的总结是准确的。然而，在深入代码后，我们发现了一些**更深层次的稳定性隐患**，这些隐患在长期运行和高并发场景下可能导致数据不一致或服务崩溃。
+
+---
+
+## 二、与独立报告的交叉对比与事实核查
+
+### 2.1 独立报告中准确的发现
+
+1. **单文件过大（准确）**：`upload-server.mjs`（1800+行）、`AssetDetailPage.tsx`、`SettingsPage.tsx` 等文件确实过于庞大，严重影响可维护性。
+2. **敏感数据硬编码（准确）**：`src/store/mockData.ts` 和 `vite.config.ts` 中确实硬编码了内网 IP `192.168.31.33`。
+3. **db-data.json 提交入库（准确）**：`server/db-data.json` 确实存在于 Git 仓库中，且未被 `.gitignore` 忽略。
+4. **幽灵页面存在（准确）**：`Dashboard.tsx`、`TaskCenterPage.tsx`、`ProcessWorkbenchPage.tsx` 存在于源码中但未挂载路由。`ProductsPage.tsx` 已挂载路由，但在 `Layout.tsx` 的侧边栏中确实没有入口。
+5. **Nginx 安全头过时（准确）**：`docker/nginx.conf` 中仍保留了 `X-Frame-Options` 和 `X-XSS-Protection`。
+6. **缺少许可证与测试（部分准确）**：仓库确实没有 `LICENSE` 和 `README.md`。关于测试，虽然没有标准的单元测试套件，但存在 `server/test-local-mineru.mjs` 作为本地 MinerU 链路的冒烟测试脚本。
+
+### 2.2 独立报告未发现的深层稳定性隐患（核心增补）
+
+独立报告主要停留在静态代码扫描层面，忽略了运行时可能引发严重故障的动态逻辑缺陷。以下是本次深度代码阅读发现的关键问题：
+
+#### 1. db-server 的并发写入竞争（Race Condition）
+`db-server.mjs` 使用了基于 `setTimeout` 的防抖（Debounce）机制来将内存数据（`dbCache`）写入磁盘：
+```javascript
+function writeDB() {
+  if (writeTimer) clearTimeout(writeTimer);
+  writeTimer = setTimeout(() => {
+    // 写入临时文件后 rename
+  }, 100);
+}
+```
+**隐患分析**：在极高并发的写入请求下，防抖计时器会被不断重置，导致数据长时间驻留在内存中无法落盘。如果此时容器意外崩溃（如 OOM 或宿主机断电），将丢失大量近期更新的数据。此外，Node.js 的单线程特性虽然避免了内存读写冲突，但异步的磁盘 I/O 缺乏真正的互斥锁（Mutex），在极端情况下可能导致文件损坏。
+
+#### 2. 前端 localStorage 存储限额与静默失败
+`appContext.tsx` 中所有的状态持久化都依赖于 `saveToStorage` 函数：
+```typescript
+function saveToStorage<T>(key: string, value: T) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* ignore */ }
+}
+```
+**隐患分析**：随着 `materials` 和 `assetDetails` 数据的不断增长，JSON 字符串的体积会迅速膨胀。浏览器的 `localStorage` 通常只有 5MB 限制。一旦超出限额，`catch { /* ignore */ }` 会静默吞掉 `QuotaExceededError`，导致前端状态无法保存。用户刷新页面后，将丢失所有未成功同步到 `db-server` 的本地状态。
+
+#### 3. 预签名 URL（Presigned URL）过期导致的数据不可用
+系统大量依赖 MinIO 生成的预签名 URL（默认有效期 3600 秒）来预览和下载文件。这些 URL 被直接保存在 `db-server` 的数据库中（如 `markdownUrl`）。
+**隐患分析**：当预签名 URL 过期后，前端尝试访问这些 URL 将返回 403 Forbidden。目前系统中缺乏统一的 URL 刷新机制，导致长期存储的资产在几小时后其关联文件链接全部失效，严重破坏了系统的长期可用性。
+
+#### 4. upload-server 缺乏全局错误处理中间件
+虽然 `upload-server.mjs` 捕获了 `uncaughtException` 和 `unhandledRejection`，但 Express 应用本身缺乏全局的错误处理中间件（如 `app.use((err, req, res, next) => {...})`）。
+**隐患分析**：如果在路由处理函数中发生同步抛出的未捕获异常，或者异步错误未正确传递给 `next(err)`，可能导致请求挂起（客户端一直等待响应直到超时），甚至引发内存泄漏。
+
+#### 5. 批处理队列的内存泄漏风险
+`BatchUploadModal.tsx` 中维护了复杂的并发上传和轮询逻辑。
+**隐患分析**：虽然使用了 `AbortController` 来控制单次请求的超时，但在组件卸载或用户强制中断时，缺乏对所有进行中 Promise 的统一清理机制。长期运行大批量任务可能导致浏览器内存占用持续上升。
+
+---
+
+## 三、稳定性与健壮性提升方案（按优先级排序）
+
+为了使项目能够长期持续反复执行任务，建议按照以下优先级进行修复：
+
+### 阶段一：修复致命的运行时隐患（立即执行）
+
+1. **解决 localStorage 容量溢出问题**
+   - **方案**：移除 `appContext.tsx` 中对全量数据的 `localStorage` 同步。对于大型列表（如 `materials`、`assetDetails`），应完全依赖 `db-server` 作为唯一事实来源，前端仅在内存中维护状态。`localStorage` 仅用于存储轻量级的用户偏好设置（如 `aiRuleSettings`）。
+2. **修复预签名 URL 过期问题**
+   - **方案**：数据库中不再持久化存储 `presignedUrl`，而是仅存储 `objectName`（如 `originals/123/file.pdf`）。前端需要访问文件时，通过调用 `upload-server` 的新接口（如 `/api/presign?objectName=...`）实时获取短期有效的 URL，或者统一使用 `/proxy-file` 接口进行流式代理。
+3. **加固 db-server 的持久化机制**
+   - **方案**：引入 `async-mutex` 或类似机制确保磁盘写入的原子性。修改防抖逻辑，增加“最大延迟时间”（Max Wait），确保即使在持续高并发写入时，数据也能在固定时间（如 5 秒）内强制落盘一次。
+
+### 阶段二：架构解耦与代码重构（短期计划）
+
+1. **拆分 upload-server.mjs**
+   - **方案**：将 1800 行的单文件拆分为路由层（`routes/`）、服务层（`services/minio.js`, `services/mineru.js`, `services/ai.js`）和中间件层。这不仅能提升可维护性，还能更容易地编写单元测试。
+2. **重构前端状态管理**
+   - **方案**：当前的单一 `appContext` 过于庞大，每次状态更新都会导致整个应用树的重新渲染。建议引入 `Zustand` 或 `Redux Toolkit`，将状态按业务域（资料库、批处理队列、系统设置）拆分为独立的 Store，提升渲染性能。
+3. **清理敏感信息与幽灵代码**
+   - **方案**：将 `mockData.ts` 和 `vite.config.ts` 中的内网 IP 提取到 `.env` 文件中。删除未使用的页面组件，或为其配置正确的路由入口。将 `db-data.json` 加入 `.gitignore`。
+
+### 阶段三：完善测试与监控（长期保障）
+
+1. **建立自动化测试体系**
+   - **方案**：引入 `Vitest` 或 `Jest`，首先为核心的纯函数（如 `appReducer.ts`、`sort.ts`）编写单元测试。随后为 `upload-server` 的核心接口编写集成测试。
+2. **增加全局错误监控**
+   - **方案**：在 `upload-server` 中补充 Express 全局错误处理中间件。前端可考虑接入 Sentry 等异常监控平台，捕获并上报未处理的 JS 错误和 Promise Rejection。
+
+---
+
+## 四、结论
+
+`Luceon2026` 项目在容器化编排、服务拆分和基础功能实现上具有较好的起点，其“MinIO 优先，tmpfiles 降级”的策略体现了良好的可用性设计。
+
+然而，项目目前仍处于“原型验证（PoC）”向“生产级应用”过渡的阶段。独立报告指出的代码结构问题是准确的，但**真正的风险在于状态同步、存储限额和 URL 时效性等深层逻辑缺陷**。只有优先解决这些运行时隐患，项目才能真正具备长期稳定执行大规模教育资产处理任务的能力。

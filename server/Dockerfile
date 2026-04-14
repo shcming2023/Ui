@@ -19,7 +19,7 @@ COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # 安装 pnpm 并仅安装生产依赖
 RUN corepack enable && corepack prepare pnpm@latest --activate \
-  && pnpm install --frozen-lockfile --prod
+  && pnpm install --no-frozen-lockfile --prod
 
 # 复制服务端源码
 COPY server/upload-server.mjs ./server/

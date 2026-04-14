@@ -6,8 +6,13 @@
   "scripts": {
     "build": "vite build",
     "dev": "vite",
-    "upload:server": "node server/upload-server.mjs",
-    "db:server": "node server/db-server.mjs",
+    "upload:server": "node --env-file=.env server/upload-server.mjs",
+    "db:server": "node --env-file=.env server/db-server.mjs",
+    "proxy:server": "node server/proxy-server.mjs",
+    "uat:start": "bash start-uat.sh",
+    "uat:build": "bash start-uat.sh --build",
+    "uat:stop": "bash start-uat.sh stop",
+    "uat:smoke": "bash uat/smoke-test.sh",
     "test:local-mineru": "node server/test-local-mineru.mjs"
   },
   "dependencies": {

@@ -1,0 +1,17 @@
+{
+  "name": "eduasset-cms-uat",
+  "version": "1.0.0",
+  "description": "EduAsset CMS UAT 测试套件",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug",
+    "report": "playwright show-report playwright-report",
+    "install:browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.43.0",
+    "@types/node": "^20.0.0"
+  }
+}

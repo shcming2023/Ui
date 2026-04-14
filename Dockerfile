@@ -17,7 +17,7 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 
 # 安装所有依赖（包括 devDependencies，构建时需要）
-RUN pnpm install --frozen-lockfile
+RUN pnpm install --no-frozen-lockfile
 
 # 复制全部源码
 COPY . .
