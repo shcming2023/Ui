@@ -1,42 +1,38 @@
 import type { ReactNode } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, Link } from 'react-router-dom';
 import {
+  LayoutDashboard,
   FolderOpen,
   Tag,
   Settings,
-  ChevronRight,
   FileText,
   Package,
+  BookOpen,
+  Bell,
+  GraduationCap,
+  HelpCircle,
 } from 'lucide-react';
 import { BatchProcessingController, BatchProgressFab, BatchUploadModal } from './BatchUploadModal';
 
-interface NavItem {
-  label: string;
-  path: string;
-  icon: ReactNode;
-}
+/* ── 顶部快捷导航 ──────────────────────────────────────────── */
+const TOP_NAV = [
+  { name: '工作台',   href: '/' },
+  { name: '资料库',   href: '/source-materials' },
+  { name: '成品库',   href: '/products' },
+];
 
-interface NavGroup {
-  title: string;
-  items: NavItem[];
-}
+/* ── 侧边栏主导航 ──────────────────────────────────────────── */
+const SIDE_NAV = [
+  { name: '工作台',       href: '/',                  icon: LayoutDashboard },
+  { name: '原始资料',     href: '/source-materials',  icon: FolderOpen },
+  { name: '成品库',       href: '/products',          icon: GraduationCap },
+  { name: '元数据管理',   href: '/metadata',          icon: Tag },
+];
 
-const NAV_GROUPS: NavGroup[] = [
-  {
-    title: '内容管理',
-    items: [
-      { label: '原始资料',   path: '/source-materials',  icon: <FolderOpen size={18} /> },
-      { label: '成品库',     path: '/products',          icon: <Package size={18} /> },
-      { label: '元数据管理', path: '/metadata',           icon: <Tag size={18} /> },
-      { label: '系统设置',   path: '/settings',           icon: <Settings size={18} /> },
-    ],
-  },
-  {
-    title: 'Overleaf 备份',
-    items: [
-      { label: 'LaTeX 工具', path: '/backup/latex',      icon: <FileText size={18} /> },
-    ],
-  },
+/* ── 侧边栏底部导航 ──────────────────────────────────────────── */
+const BOTTOM_NAV = [
+  { name: '系统设置',     href: '/settings',          icon: Settings },
+  { name: 'LaTeX 工具',   href: '/backup/latex',      icon: FileText },
 ];
 
 interface LayoutProps {
@@ -53,58 +49,136 @@ export function Layout({ children }: LayoutProps) {
   };
 
   return (
-    <div className="flex h-screen bg-gray-50 overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-56 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col">
-        {/* Logo */}
-        <div className="h-14 flex items-center px-5 border-b border-gray-100">
-          <span className="font-bold text-base text-gray-800">教材资料 CMS</span>
-        </div>
-
-        {/* Nav */}
-        <nav className="flex-1 py-3 overflow-y-auto">
-          {NAV_GROUPS.map((group, gi) => (
-            <div key={group.title}>
-              {gi > 0 && <div className="mx-4 my-2 border-t border-gray-100" />}
-              <div className="px-4 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wide">
-                {group.title}
-              </div>
-              {group.items.map((item) => {
-                const active = isActive(item.path);
+    <div className="h-screen flex flex-col bg-slate-50 overflow-hidden">
+      {/* ── 顶部导航栏 ─────────────────────────────────────── */}
+      <header className="h-14 bg-white/60 backdrop-blur-md border-b border-slate-200 flex-shrink-0 z-50">
+        <div className="h-full px-8 flex items-center justify-between">
+          {/* 左侧：品牌 + 快捷导航 */}
+          <div className="flex items-center gap-8">
+            <Link to="/" className="font-bold text-lg text-blue-700 whitespace-nowrap">
+              EduDoc Platform
+            </Link>
+            <nav className="hidden md:flex items-center gap-6">
+              {TOP_NAV.map((item) => {
+                const active = isActive(item.href);
                 return (
-                  <button
-                    key={item.path}
-                    onClick={() => navigate(item.path)}
-                    className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm font-medium transition-colors rounded-lg mx-1 mb-0.5
-                      ${active
-                        ? 'bg-blue-50 text-blue-700'
-                        : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-                      }`}
-                    style={{ width: 'calc(100% - 8px)' }}
+                  <Link
+                    key={item.href}
+                    to={item.href}
+                    className={`pb-0.5 text-sm font-medium transition-colors ${
+                      active
+                        ? 'text-blue-700 border-b-2 border-blue-600'
+                        : 'text-slate-500 hover:text-slate-900'
+                    }`}
                   >
-                    <span className={active ? 'text-blue-600' : 'text-gray-400'}>{item.icon}</span>
-                    <span className="flex-1 text-left">{item.label}</span>
-                    {active && <ChevronRight size={14} className="text-blue-400" />}
-                  </button>
+                    {item.name}
+                  </Link>
                 );
               })}
+            </nav>
+          </div>
+
+          {/* 右侧：操作按钮 + 通知 + 头像 */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => navigate('/source-materials')}
+              className="hidden sm:flex px-5 py-1.5 bg-gradient-to-r from-blue-600 to-blue-700 text-white text-sm font-semibold rounded-xl shadow-sm hover:shadow-md transition-shadow items-center gap-2"
+            >
+              上传资料
+            </button>
+            <button className="relative p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors">
+              <Bell className="w-5 h-5" />
+            </button>
+            <button
+              onClick={() => navigate('/settings')}
+              className="relative p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors"
+            >
+              <Settings className="w-5 h-5" />
+            </button>
+            <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 border-2 border-blue-200 flex items-center justify-center text-white text-xs font-bold">
+              U
             </div>
-          ))}
-        </nav>
-
-        {/* Footer */}
-        <div className="px-4 py-3 border-t border-gray-100 text-xs text-gray-400">
-          v0.0.1
+          </div>
         </div>
-      </aside>
+      </header>
 
-      {/* Main content */}
-      <main className="flex-1 overflow-y-auto">
-        {children}
-        <BatchProcessingController />
-        <BatchUploadModal />
-        <BatchProgressFab />
-      </main>
+      {/* ── 主体区域 ───────────────────────────────────────── */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* 侧边栏 */}
+        <aside className="w-60 flex-shrink-0 bg-white border-r border-slate-200 flex flex-col overflow-hidden">
+          {/* 品牌 Logo 区 */}
+          <div className="px-5 pt-5 pb-3">
+            <div className="flex items-center gap-3 mb-1.5">
+              <div className="w-9 h-9 bg-blue-600 rounded-xl flex items-center justify-center flex-shrink-0">
+                <BookOpen className="w-4.5 h-4.5 text-white" />
+              </div>
+              <div className="leading-tight">
+                <div className="font-extrabold text-blue-700 text-sm">EduDoc</div>
+                <div className="font-extrabold text-blue-700 text-sm">Platform</div>
+              </div>
+            </div>
+            <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+              教育文档处理平台
+            </p>
+          </div>
+
+          {/* 主导航 */}
+          <nav className="flex-1 px-3 py-2 overflow-y-auto">
+            <div className="mb-1 px-3 py-1.5">
+              <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider">
+                内容管理
+              </span>
+            </div>
+            {SIDE_NAV.map((item) => {
+              const active = isActive(item.href);
+              return (
+                <button
+                  key={item.href}
+                  onClick={() => navigate(item.href)}
+                  className={`w-full flex items-center gap-3 px-3 py-2.5 mb-0.5 rounded-lg text-sm font-medium transition-colors ${
+                    active
+                      ? 'bg-blue-50 text-blue-700'
+                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  <item.icon className={`w-[18px] h-[18px] flex-shrink-0 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
+                  <span className="text-xs font-semibold tracking-wide">{item.name}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* 底部导航 */}
+          <div className="px-3 py-3 border-t border-slate-100">
+            {BOTTOM_NAV.map((item) => {
+              const active = isActive(item.href);
+              return (
+                <button
+                  key={item.href}
+                  onClick={() => navigate(item.href)}
+                  className={`w-full flex items-center gap-3 px-3 py-2 mb-0.5 rounded-lg text-sm transition-colors ${
+                    active
+                      ? 'bg-blue-50 text-blue-700 font-medium'
+                      : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'
+                  }`}
+                >
+                  <item.icon className={`w-4 h-4 flex-shrink-0 ${active ? 'text-blue-600' : 'text-slate-400'}`} />
+                  <span className="text-xs font-semibold">{item.name}</span>
+                </button>
+              );
+            })}
+            <div className="mt-2 px-3 text-[10px] text-slate-300">v0.2.0</div>
+          </div>
+        </aside>
+
+        {/* 页面内容 */}
+        <main className="flex-1 overflow-y-auto">
+          {children}
+          <BatchProcessingController />
+          <BatchUploadModal />
+          <BatchProgressFab />
+        </main>
+      </div>
     </div>
   );
 }

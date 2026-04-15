@@ -1,6 +1,22 @@
 import { useState, useMemo, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Search, Upload, Grid, List, SortAsc, AlertTriangle, RefreshCw, Trash2, ChevronDown, ChevronRight, FolderPlus } from 'lucide-react';
+import {
+  Search,
+  Upload,
+  Grid,
+  List,
+  SortAsc,
+  AlertTriangle,
+  RefreshCw,
+  Trash2,
+  ChevronDown,
+  ChevronRight,
+  FolderPlus,
+  FileText,
+  Cpu,
+  CheckCircle,
+  Clock,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import { batchRegisterFiles } from '../components/BatchUploadModal';
@@ -9,19 +25,13 @@ import type { TabFilter, SortOption, ViewMode } from '../../store/types';
 import { sortMaterials } from '../../utils/sort';
 import { usePagination, getPageNumbers } from '../../utils/pagination';
 
-/** 删除确认弹窗（始终使用 toast，避免 window.confirm 在各类环境中被屏蔽） */
+/** 删除确认弹窗 */
 function confirmDelete(message: string): Promise<boolean> {
   return new Promise((resolve) => {
     toast(message, {
       duration: 10000,
-      action: {
-        label: '确认删除',
-        onClick: () => resolve(true),
-      },
-      cancel: {
-        label: '取消',
-        onClick: () => resolve(false),
-      },
+      action: { label: '确认删除', onClick: () => resolve(true) },
+      cancel: { label: '取消', onClick: () => resolve(false) },
       onDismiss: () => resolve(false),
       onAutoClose: () => resolve(false),
     });
@@ -72,6 +82,7 @@ export function SourceMaterialsPage() {
   const { state, dispatch } = useAppStore();
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const [tab, setTab] = useState<TabFilter>('completed');
   const [search, setSearch] = useState('');
@@ -87,12 +98,11 @@ export function SourceMaterialsPage() {
 
   const advancedOptions = useMemo(() => {
     const unique = (values: (string | undefined)[]) =>
-      [...new Set(values.map((value) => value?.trim()).filter(Boolean) as string[])].sort((a, b) => a.localeCompare(b, 'zh-CN'));
-
+      [...new Set(values.map((v) => v?.trim()).filter(Boolean) as string[])].sort((a, b) => a.localeCompare(b, 'zh-CN'));
     return {
-      subjects: unique(state.materials.map((item) => item.metadata?.subject)),
-      grades: unique(state.materials.map((item) => item.metadata?.grade)),
-      languages: unique(state.materials.map((item) => item.metadata?.language)),
+      subjects: unique(state.materials.map((i) => i.metadata?.subject)),
+      grades: unique(state.materials.map((i) => i.metadata?.grade)),
+      languages: unique(state.materials.map((i) => i.metadata?.language)),
     };
   }, [state.materials]);
 
@@ -118,23 +128,16 @@ export function SourceMaterialsPage() {
 
   const { currentItems, currentPage, totalPages, goToPage, hasPrev, hasNext, prevPage, nextPage } =
     usePagination(filtered);
-
   const pageNumbers = getPageNumbers(currentPage, totalPages);
 
   const summary = useMemo(() => {
-    const statusCounts = filtered.reduce<Record<TabFilter, number>>((acc, item) => {
-      acc[item.status] += 1;
-      return acc;
-    }, { all: filtered.length, pending: 0, processing: 0, reviewing: 0, failed: 0, completed: 0 });
-
+    const statusCounts = filtered.reduce<Record<TabFilter, number>>(
+      (acc, item) => { acc[item.status] += 1; return acc; },
+      { all: filtered.length, pending: 0, processing: 0, reviewing: 0, failed: 0, completed: 0 },
+    );
     const totalSizeBytes = filtered.reduce((sum, item) => sum + (item.sizeBytes || 0), 0);
     const subjectCoverage = new Set(filtered.map((item) => item.metadata?.subject).filter(Boolean)).size;
-
-    return {
-      statusCounts,
-      totalSizeBytes,
-      subjectCoverage,
-    };
+    return { statusCounts, totalSizeBytes, subjectCoverage };
   }, [filtered]);
 
   const isCurrentPageFullySelected = currentItems.length > 0 && currentItems.every((item) => selectedIds.has(item.id));
@@ -153,32 +156,19 @@ export function SourceMaterialsPage() {
 
   const validateFile = (file: File): { valid: boolean; error?: string } => {
     const { mineruConfig } = state;
-    const MAX_SIZE = (mineruConfig.maxFileSize || 0) > 0
-      ? mineruConfig.maxFileSize
-      : 200 * 1024 * 1024; // 默认 200MB
-
+    const MAX_SIZE = (mineruConfig.maxFileSize || 0) > 0 ? mineruConfig.maxFileSize : 200 * 1024 * 1024;
     if (file.size > MAX_SIZE) {
-      const maxSizeMB = Math.round(MAX_SIZE / (1024 * 1024));
-      return {
-        valid: false,
-        error: `文件 "${file.name}" 超过上传限制 (最大 ${maxSizeMB}MB)`,
-      };
+      return { valid: false, error: `文件 "${file.name}" 超过上传限制 (最大 ${Math.round(MAX_SIZE / (1024 * 1024))}MB)` };
     }
     return { valid: true };
   };
 
-  const folderInputRef = useRef<HTMLInputElement>(null);
   const showStatusColumn = tab !== 'completed';
 
   const getStageSummary = (m: typeof state.materials[number]) => {
     if (m.status === 'completed') return { label: '完成', detail: '' };
     if (m.status === 'failed') {
-      const detail =
-        m.aiStatus === 'failed'
-          ? 'AI 分析失败'
-          : m.mineruStatus === 'failed'
-            ? 'MinerU 解析失败'
-            : '处理失败';
+      const detail = m.aiStatus === 'failed' ? 'AI 分析失败' : m.mineruStatus === 'failed' ? 'MinerU 解析失败' : '处理失败';
       return { label: '失败', detail };
     }
     const stage = String(m.metadata?.processingStage || '').trim();
@@ -193,33 +183,21 @@ export function SourceMaterialsPage() {
     return { label: '处理中', detail: msg };
   };
 
-  // 文件/文件夹选择处理
   const handleBatchFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length === 0) return;
-
-    // 前置校验
-    const invalidFiles = files.filter(f => !validateFile(f).valid);
+    const invalidFiles = files.filter((f) => !validateFile(f).valid);
     if (invalidFiles.length > 0) {
       toast.error(`发现 ${invalidFiles.length} 个不符合规范的文件被过滤`, { icon: <AlertTriangle size={16} /> });
     }
-
-    const validFiles = files.filter(f => validateFile(f).valid);
+    const validFiles = files.filter((f) => validateFile(f).valid);
     if (validFiles.length > 0) {
       const registered = validFiles.map((file) => {
         const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
         const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-        return {
-          id,
-          file,
-          fileName: file.name,
-          fileSize: file.size,
-          path,
-        };
+        return { id, file, fileName: file.name, fileSize: file.size, path };
       });
-
       batchRegisterFiles(registered.map((it) => ({ id: it.id, file: it.file })));
-
       dispatch({
         type: 'BATCH_ADD_FILES',
         payload: {
@@ -228,26 +206,22 @@ export function SourceMaterialsPage() {
         },
       });
     }
-    
     e.target.value = '';
   };
 
-  // 重置配置
   const handleResetConfig = () => {
     try {
-      // 清除所有配置类 localStorage key（不包含业务数据）
       localStorage.removeItem('app_ai_config');
       localStorage.removeItem('app_mineru_config');
-      localStorage.removeItem('app_minio_config');       // MinIO 存储配置
-      localStorage.removeItem('app_ai_rule_settings');   // AI 规则执行设置
+      localStorage.removeItem('app_minio_config');
+      localStorage.removeItem('app_ai_rule_settings');
       toast.success('配置已重置，页面将刷新');
       setTimeout(() => window.location.reload(), 1000);
-    } catch (error) {
+    } catch {
       toast.error('重置配置失败');
     }
   };
 
-  // 选择切换
   const toggleSelect = (id: number) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -256,19 +230,16 @@ export function SourceMaterialsPage() {
     });
   };
 
-  // 批量删除
   const handleBatchDelete = async () => {
     if (selectedIds.size === 0) return;
     const ids = Array.from(selectedIds);
-    const relatedTaskCount = state.processTasks.filter(
-      (t) => t.materialId !== undefined && ids.includes(t.materialId),
-    ).length;
+    const relatedTaskCount = state.processTasks.filter((t) => t.materialId !== undefined && ids.includes(t.materialId)).length;
     const hasUploaded = ids.some((id) => {
       const m = state.materials.find((mat) => mat.id === id);
       return m?.metadata?.objectName || m?.mineruStatus || m?.aiStatus;
     });
     let msg = `确定删除选中的 ${ids.length} 条资料吗？此操作不可撤销。`;
-    if (hasUploaded) msg += '\n\n⚠️ 其中部分资料已上传至云存储，删除后原始文件和解析产物将一并清除。';
+    if (hasUploaded) msg += '\n\n其中部分资料已上传至云存储，删除后原始文件和解析产物将一并清除。';
     if (relatedTaskCount > 0) msg += `\n关联的 ${relatedTaskCount} 条处理任务也将同步删除。`;
     const ok = await confirmDelete(msg);
     if (!ok) return;
@@ -277,7 +248,6 @@ export function SourceMaterialsPage() {
     toast.success(`已删除 ${ids.length} 条资料`);
   };
 
-  // 单条删除
   const handleDelete = async (e: React.MouseEvent, id: number) => {
     e.stopPropagation();
     const material = state.materials.find((m) => m.id === id);
@@ -285,7 +255,7 @@ export function SourceMaterialsPage() {
     const relatedTaskCount = state.processTasks.filter((t) => t.materialId === id).length;
     let msg = `确定删除「${name}」吗？此操作不可撤销。`;
     if (material?.metadata?.objectName || material?.mineruStatus || material?.aiStatus) {
-      msg += '\n\n⚠️ 该资料已上传至云存储，删除后原始文件和解析产物将一并清除。';
+      msg += '\n\n该资料已上传至云存储，删除后原始文件和解析产物将一并清除。';
     }
     if (relatedTaskCount > 0) msg += `\n关联的 ${relatedTaskCount} 条处理任务也将同步删除。`;
     const ok = await confirmDelete(msg);
@@ -295,20 +265,13 @@ export function SourceMaterialsPage() {
     toast.success('已删除');
   };
 
-  // 清空所有数据（localStorage + 内存，db-server 通过 DELETE_MATERIAL 联动删除）
   const handleClearAll = async () => {
     if (state.materials.length === 0) { toast('暂无数据'); return; }
     const allIds = state.materials.map((m) => m.id);
-    const totalTaskCount = state.processTasks.filter(
-      (t) => t.materialId !== undefined && allIds.includes(t.materialId),
-    ).length;
-    const uploadedCount = state.materials.filter(
-      (m) => m.metadata?.objectName || m.mineruStatus || m.aiStatus,
-    ).length;
+    const totalTaskCount = state.processTasks.filter((t) => t.materialId !== undefined && allIds.includes(t.materialId)).length;
+    const uploadedCount = state.materials.filter((m) => m.metadata?.objectName || m.mineruStatus || m.aiStatus).length;
     let msg = `确定清空全部 ${state.materials.length} 条资料吗？此操作不可撤销。`;
-    if (uploadedCount > 0) {
-      msg += `\n\n⚠️ 其中 ${uploadedCount} 条资料已上传至云存储，删除后原始文件和解析产物将一并清除。`;
-    }
+    if (uploadedCount > 0) msg += `\n\n其中 ${uploadedCount} 条资料已上传至云存储，删除后原始文件和解析产物将一并清除。`;
     if (totalTaskCount > 0) msg += `\n关联的 ${totalTaskCount} 条处理任务也将同步删除。`;
     const ok = await confirmDelete(msg);
     if (!ok) return;
@@ -317,436 +280,401 @@ export function SourceMaterialsPage() {
     toast.success(`已清空全部 ${allIds.length} 条资料`);
   };
 
+  /* ── 获取文件类型颜色 ─────────────────────────────────── */
+  const typeColor = (type: string) => {
+    if (type === 'PDF') return { bg: 'bg-red-100', text: 'text-red-600', badge: 'bg-red-600' };
+    if (type === 'DOCX' || type === 'DOC') return { bg: 'bg-blue-100', text: 'text-blue-600', badge: 'bg-blue-600' };
+    return { bg: 'bg-orange-100', text: 'text-orange-600', badge: 'bg-orange-600' };
+  };
+
   return (
-    <div className="p-6 space-y-4">
-      {/* 头部 */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">原始资料库</h1>
-          <p className="text-sm text-gray-500 mt-0.5">共 {state.materials.length} 条资料</p>
-        </div>
-        <div className="flex items-center gap-2">
-          {selectedIds.size > 0 && (
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50/30">
+      <div className="max-w-[1400px] mx-auto px-8 py-8">
+        {/* ── 页面头部 ─────────────────────────────────── */}
+        <div className="flex items-start justify-between mb-8">
+          <div>
+            <h1 className="text-3xl font-bold text-slate-900 mb-1">原始资料库</h1>
+            <p className="text-slate-500 text-sm">
+              管理上传的教育资料 · 共 {state.materials.length} 条
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            {selectedIds.size > 0 && (
+              <button
+                onClick={handleBatchDelete}
+                className="px-4 py-2 text-sm text-red-600 border border-red-200 rounded-xl hover:bg-red-50 font-medium transition-colors"
+              >
+                删除选中 ({selectedIds.size})
+              </button>
+            )}
+            {currentItems.length > 0 && (
+              <button
+                onClick={handleSelectCurrentPage}
+                className="px-4 py-2 text-sm text-slate-600 border border-slate-200 rounded-xl hover:bg-slate-50 font-medium transition-colors"
+              >
+                {isCurrentPageFullySelected ? '取消当前页' : '全选当前页'}
+              </button>
+            )}
             <button
-              onClick={handleBatchDelete}
-              className="px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
+              onClick={handleClearAll}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm text-red-600 border border-red-200 rounded-xl hover:bg-red-50 font-medium transition-colors"
             >
-              删除选中 ({selectedIds.size})
+              <Trash2 size={14} />
+              清空
             </button>
-          )}
-          {currentItems.length > 0 && (
             <button
-              onClick={handleSelectCurrentPage}
-              className="px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
+              data-testid="reset-config-btn"
+              onClick={handleResetConfig}
+              className="flex items-center gap-1.5 px-4 py-2 text-sm text-slate-600 border border-slate-200 rounded-xl hover:bg-slate-50 font-medium transition-colors"
+              title="重置配置解决上传问题"
             >
-              {isCurrentPageFullySelected ? '取消当前页' : '全选当前页'}
+              <RefreshCw size={14} />
+              重置
             </button>
-          )}
-          <button
-            onClick={handleClearAll}
-            className="flex items-center gap-2 px-3 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50"
-          >
-            <Trash2 size={15} />
-            清空全部
-          </button>
-          <button
-            data-testid="reset-config-btn"
-            onClick={handleResetConfig}
-            className="flex items-center gap-2 px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
-            title="重置配置解决上传问题"
-          >
-            <RefreshCw size={16} />
-            重置配置
-          </button>
-          <input
-            ref={fileInputRef}
-            data-testid="file-input"
-            type="file"
-            multiple
-            className="hidden"
-            onChange={handleBatchFileSelect}
-            accept=".pdf,.docx,.doc,.pptx,.ppt,.jpg,.jpeg,.png"
-          />
-          <input
-            ref={folderInputRef}
-            type="file"
-            // @ts-ignore
-            webkitdirectory="true"
-            directory="true"
-            className="hidden"
-            onChange={handleBatchFileSelect}
-          />
-          <div className="flex bg-blue-600 rounded-lg overflow-hidden text-white text-sm hover:bg-blue-700 transition-colors">
-            <button
-              data-testid="upload-button"
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-blue-700"
-            >
-              <Upload size={16} />
-              文件
-            </button>
-            <div className="w-px bg-blue-500 my-2" />
-            <button
-              onClick={() => folderInputRef.current?.click()}
-              className="flex items-center gap-2 px-4 py-2 hover:bg-blue-700"
-              title="上传整个文件夹"
-            >
-              <FolderPlus size={16} />
-              文件夹
-            </button>
+            <input ref={fileInputRef} data-testid="file-input" type="file" multiple className="hidden" onChange={handleBatchFileSelect} accept=".pdf,.docx,.doc,.pptx,.ppt,.jpg,.jpeg,.png" />
+            {/* @ts-expect-error webkitdirectory is a non-standard attribute */}
+            <input ref={folderInputRef} type="file" webkitdirectory="true" directory="true" className="hidden" onChange={handleBatchFileSelect} />
+            <div className="flex bg-blue-600 rounded-xl overflow-hidden text-white text-sm font-semibold hover:bg-blue-700 transition-colors">
+              <button data-testid="upload-button" onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700">
+                <Upload size={15} />
+                文件
+              </button>
+              <div className="w-px bg-blue-500 my-2" />
+              <button onClick={() => folderInputRef.current?.click()} className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700" title="上传整个文件夹">
+                <FolderPlus size={15} />
+                文件夹
+              </button>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <p className="text-xs text-gray-500">当前结果</p>
-          <p className="mt-1 text-2xl font-semibold text-gray-900">{filtered.length}</p>
-          <p className="mt-1 text-xs text-gray-400">待处理 {summary.statusCounts.pending} · 完成 {summary.statusCounts.completed}</p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <p className="text-xs text-gray-500">处理中 / 审核中</p>
-          <p className="mt-1 text-2xl font-semibold text-gray-900">{summary.statusCounts.processing + summary.statusCounts.reviewing}</p>
-          <p className="mt-1 text-xs text-gray-400">失败 {summary.statusCounts.failed}</p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <p className="text-xs text-gray-500">总存储占用</p>
-          <p className="mt-1 text-2xl font-semibold text-gray-900">{formatBytes(summary.totalSizeBytes)}</p>
-          <p className="mt-1 text-xs text-gray-400">按当前筛选结果汇总</p>
-        </div>
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <p className="text-xs text-gray-500">学科覆盖</p>
-          <p className="mt-1 text-2xl font-semibold text-gray-900">{summary.subjectCoverage}</p>
-          <p className="mt-1 text-xs text-gray-400">已识别学科数</p>
-        </div>
-      </div>
-
-      {/* 筛选栏 */}
-      <div className="flex items-center gap-3 flex-wrap">
-        {/* Tab 过滤 */}
-        <div className="flex bg-gray-100 rounded-lg p-1 gap-0.5">
-          {TAB_OPTIONS.map((opt) => (
-            <button
-              key={opt.key}
-              onClick={() => setTab(opt.key)}
-              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                tab === opt.key
-                  ? 'bg-white text-blue-700 shadow-sm'
-                  : 'text-gray-600 hover:text-gray-900'
-              }`}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
-        {/* 搜索 */}
-        <div className="flex-1 min-w-48 relative">
-          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="搜索资料名称、标签、上传者..."
-            className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-300"
-          />
-        </div>
-
-        {/* 排序 */}
-        <div className="flex items-center gap-1.5">
-          <SortAsc size={14} className="text-gray-400" />
-          <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as SortOption)}
-            className="text-sm border border-gray-200 rounded-lg px-2 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
-          >
-            {SORT_OPTIONS.map((o) => (
-              <option key={o.key} value={o.key}>{o.label}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* 视图切换 */}
-        <div className="flex border border-gray-200 rounded-lg overflow-hidden">
-          <button
-            onClick={() => setViewMode('list')}
-            className={`p-2 ${viewMode === 'list' ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
-          >
-            <List size={16} />
-          </button>
-          <button
-            onClick={() => setViewMode('grid')}
-            className={`p-2 ${viewMode === 'grid' ? 'bg-blue-50 text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
-          >
-            <Grid size={16} />
-          </button>
-        </div>
-
-        <button
-          onClick={() => setAdvancedExpanded((prev) => !prev)}
-          className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50"
-        >
-          {advancedExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-          高级筛选
-        </button>
-      </div>
-
-      {advancedExpanded && (
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
-            <select
-              value={subjectFilter}
-              onChange={(e) => setSubjectFilter(e.target.value)}
-              className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300"
-            >
-              <option value="all">全部学科</option>
-              {advancedOptions.subjects.map((item) => (
-                <option key={item} value={item}>{item}</option>
-              ))}
-            </select>
-            <select
-              value={gradeFilter}
-              onChange={(e) => setGradeFilter(e.target.value)}
-              className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300"
-            >
-              <option value="all">全部年级</option>
-              {advancedOptions.grades.map((item) => (
-                <option key={item} value={item}>{item}</option>
-              ))}
-            </select>
-            <select
-              value={languageFilter}
-              onChange={(e) => setLanguageFilter(e.target.value)}
-              className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300"
-            >
-              <option value="all">全部语言</option>
-              {advancedOptions.languages.map((item) => (
-                <option key={item} value={item}>{item}</option>
-              ))}
-            </select>
-            <select
-              value={mineruStatusFilter}
-              onChange={(e) => setMineruStatusFilter(e.target.value as (typeof MINERU_STATUS_OPTIONS)[number]['key'])}
-              className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300"
-            >
-              {MINERU_STATUS_OPTIONS.map((item) => (
-                <option key={item.key} value={item.key}>{item.label}</option>
-              ))}
-            </select>
-            <select
-              value={aiStatusFilter}
-              onChange={(e) => setAiStatusFilter(e.target.value as (typeof AI_STATUS_OPTIONS)[number]['key'])}
-              className="text-sm border border-gray-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300"
-            >
-              {AI_STATUS_OPTIONS.map((item) => (
-                <option key={item.key} value={item.key}>{item.label}</option>
-              ))}
-            </select>
+        {/* ── 统计卡片 ─────────────────────────────────── */}
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-5 mb-6">
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">当前结果</p>
+            <p className="text-3xl font-bold text-slate-900">{filtered.length}</p>
+            <p className="text-xs text-slate-400 mt-1">待处理 {summary.statusCounts.pending} · 完成 {summary.statusCounts.completed}</p>
+          </div>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">处理中 / 审核中</p>
+            <p className="text-3xl font-bold text-slate-900">{summary.statusCounts.processing + summary.statusCounts.reviewing}</p>
+            <p className="text-xs text-slate-400 mt-1">失败 {summary.statusCounts.failed}</p>
+          </div>
+          <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl p-5 text-white shadow-lg">
+            <p className="text-[11px] font-semibold uppercase tracking-wide mb-2 text-blue-100">总存储占用</p>
+            <p className="text-3xl font-bold">{formatBytes(summary.totalSizeBytes)}</p>
+            <p className="text-xs text-blue-200 mt-1">按当前筛选结果汇总</p>
+          </div>
+          <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm">
+            <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-2">学科覆盖</p>
+            <p className="text-3xl font-bold text-slate-900">{summary.subjectCoverage}</p>
+            <p className="text-xs text-slate-400 mt-1">已识别学科数</p>
           </div>
         </div>
-      )}
 
-      {/* 结果数量 */}
-      {search && (
-        <p className="text-sm text-gray-500">
-          找到 <span className="font-medium text-gray-800">{filtered.length}</span> 条结果
-        </p>
-      )}
-
-      {/* 列表/网格 */}
-      {viewMode === 'list' ? (
-        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="w-10 px-4 py-3 text-left">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.size === currentItems.length && currentItems.length > 0}
-                    onChange={(e) => {
-                      if (e.target.checked) {
-                        setSelectedIds(new Set(currentItems.map((m) => m.id)));
-                      } else {
-                        setSelectedIds(new Set());
-                      }
-                    }}
-                    className="rounded"
-                  />
-                </th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">资料名称</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">类型</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">大小</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">上传者</th>
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">上传时间</th>
-                {showStatusColumn && (
-                  <th className="px-4 py-3 text-left font-semibold text-gray-700">阶段</th>
-                )}
-                <th className="px-4 py-3 text-left font-semibold text-gray-700">操作</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {currentItems.length === 0 && (
-                <tr>
-                  <td colSpan={showStatusColumn ? 8 : 7} className="text-center py-12 text-gray-400">暂无数据</td>
-                </tr>
-              )}
-              {currentItems.map((m) => (
-                <tr
-                  key={m.id}
-                  className="hover:bg-gray-50 cursor-pointer"
-                  onClick={() => navigate(`/asset/${m.id}`)}
-                >
-                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(m.id)}
-                      onChange={() => toggleSelect(m.id)}
-                      className="rounded"
-                    />
-                  </td>
-                  <td className="px-4 py-3">
-                    <div>
-                      <p className="font-medium text-gray-800 truncate max-w-xs">{m.title}</p>
-                      {m.tags.length > 0 && (
-                        <div className="flex gap-1 mt-1 flex-wrap">
-                          {m.tags.slice(0, 3).map((tag) => (
-                            <span key={tag} className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">
-                              {tag}
-                            </span>
-                          ))}
-                          {m.tags.length > 3 && (
-                            <span className="text-xs text-gray-400">+{m.tags.length - 3}</span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-gray-600">{m.type}</td>
-                  <td className="px-4 py-3 text-gray-600">{m.size}</td>
-                  <td className="px-4 py-3 text-gray-600">{m.uploader}</td>
-                  <td className="px-4 py-3 text-gray-500">{m.uploadTime}</td>
-                  {showStatusColumn && (
-                    <td className="px-4 py-3">
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center gap-2">
-                          <StatusBadge status={m.status} />
-                          <span className="text-xs text-gray-700">{getStageSummary(m).label}</span>
-                        </div>
-                        {getStageSummary(m).detail && (
-                          <div className="text-xs text-gray-400 truncate max-w-xs" title={getStageSummary(m).detail}>
-                            {getStageSummary(m).detail}
-                          </div>
-                        )}
-                      </div>
-                    </td>
-                  )}
-                  <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                    <button
-                      onClick={(e) => handleDelete(e, m.id)}
-                      className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                      title="删除"
-                    >
-                      <Trash2 size={15} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-4 md:grid-cols-3 lg:grid-cols-4">
-          {currentItems.map((m) => (
-            <div
-              key={m.id}
-              onClick={() => navigate(`/asset/${m.id}`)}
-              className="relative bg-white rounded-xl border border-gray-200 p-4 cursor-pointer hover:shadow-md transition-shadow"
-            >
-              <div className="flex items-start justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.has(m.id)}
-                    onClick={(e) => e.stopPropagation()}
-                    onChange={() => toggleSelect(m.id)}
-                    className="rounded"
-                  />
-                  <span className="text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded">
-                    {m.type}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  {showStatusColumn && <StatusBadge status={m.status} />}
-                  <button
-                    onClick={(e) => handleDelete(e, m.id)}
-                    className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
-                    title="删除"
-                  >
-                    <Trash2 size={14} />
-                  </button>
-                </div>
+        {/* ── 筛选工具栏 ─────────────────────────────────── */}
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm mb-6">
+          <div className="p-5">
+            {/* 搜索栏 */}
+            <div className="mb-4">
+              <div className="relative">
+                <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="搜索资料名称、标签、上传者..."
+                  className="w-full pl-11 pr-4 py-2.5 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-transparent text-sm bg-slate-50"
+                />
               </div>
-              <p className="text-sm font-semibold text-gray-800 line-clamp-2 mb-2">{m.title}</p>
-              <p className="text-xs text-gray-400">{m.size} · {m.uploadTime}</p>
-              <p className="text-xs text-gray-400 mt-0.5">{m.uploader}</p>
-              {showStatusColumn && (getStageSummary(m).label !== '完成') && (
-                <p className="text-xs text-gray-500 mt-1 truncate" title={getStageSummary(m).detail || getStageSummary(m).label}>
-                  {getStageSummary(m).detail || getStageSummary(m).label}
-                </p>
-              )}
-              {m.tags.length > 0 && (
-                <div className="flex gap-1 mt-2 flex-wrap">
-                  {m.tags.slice(0, 2).map((tag) => (
-                    <span key={tag} className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded">
-                      {tag}
-                    </span>
+            </div>
+
+            {/* 筛选行 */}
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Tab 过滤 */}
+                <div className="flex bg-slate-100 rounded-lg p-0.5 gap-0.5">
+                  {TAB_OPTIONS.map((opt) => (
+                    <button
+                      key={opt.key}
+                      onClick={() => setTab(opt.key)}
+                      className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                        tab === opt.key
+                          ? 'bg-white text-blue-700 shadow-sm'
+                          : 'text-slate-500 hover:text-slate-900'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
                   ))}
                 </div>
-              )}
+
+                {/* 排序 */}
+                <div className="flex items-center gap-1">
+                  <SortAsc size={14} className="text-slate-400" />
+                  <select
+                    value={sort}
+                    onChange={(e) => setSort(e.target.value as SortOption)}
+                    className="text-sm border border-slate-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-300 bg-white"
+                  >
+                    {SORT_OPTIONS.map((o) => (
+                      <option key={o.key} value={o.key}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <button
+                  onClick={() => setAdvancedExpanded((prev) => !prev)}
+                  className="flex items-center gap-1 px-3 py-1.5 text-sm text-slate-500 hover:text-slate-900 hover:bg-slate-50 rounded-lg transition-colors"
+                >
+                  {advancedExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                  高级筛选
+                </button>
+              </div>
+
+              {/* 视图切换 */}
+              <div className="flex items-center gap-1 p-0.5 bg-slate-100 rounded-lg">
+                <button
+                  onClick={() => setViewMode('list')}
+                  className={`p-2 rounded ${viewMode === 'list' ? 'bg-white shadow-sm' : 'hover:bg-slate-50'}`}
+                >
+                  <List className={`w-4 h-4 ${viewMode === 'list' ? 'text-blue-600' : 'text-slate-400'}`} />
+                </button>
+                <button
+                  onClick={() => setViewMode('grid')}
+                  className={`p-2 rounded ${viewMode === 'grid' ? 'bg-white shadow-sm' : 'hover:bg-slate-50'}`}
+                >
+                  <Grid className={`w-4 h-4 ${viewMode === 'grid' ? 'text-blue-600' : 'text-slate-400'}`} />
+                </button>
+              </div>
             </div>
-          ))}
-          {currentItems.length === 0 && (
-            <div className="col-span-4 text-center py-12 text-gray-400">暂无数据</div>
+          </div>
+
+          {/* 高级筛选面板 */}
+          {advancedExpanded && (
+            <div className="px-5 pb-5 pt-0">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-5 p-4 bg-slate-50 rounded-xl">
+                <select value={subjectFilter} onChange={(e) => setSubjectFilter(e.target.value)} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  <option value="all">全部学科</option>
+                  {advancedOptions.subjects.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <select value={gradeFilter} onChange={(e) => setGradeFilter(e.target.value)} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  <option value="all">全部年级</option>
+                  {advancedOptions.grades.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <select value={languageFilter} onChange={(e) => setLanguageFilter(e.target.value)} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  <option value="all">全部语言</option>
+                  {advancedOptions.languages.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+                <select value={mineruStatusFilter} onChange={(e) => setMineruStatusFilter(e.target.value as (typeof MINERU_STATUS_OPTIONS)[number]['key'])} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  {MINERU_STATUS_OPTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                </select>
+                <select value={aiStatusFilter} onChange={(e) => setAiStatusFilter(e.target.value as (typeof AI_STATUS_OPTIONS)[number]['key'])} className="text-sm border border-slate-200 rounded-lg px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-blue-300">
+                  {AI_STATUS_OPTIONS.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}
+                </select>
+              </div>
+            </div>
           )}
         </div>
-      )}
 
-      {/* 分页 */}
-      {totalPages > 1 && (
-        <div className="flex items-center justify-center gap-1 pt-2">
-          <button
-            onClick={prevPage}
-            disabled={!hasPrev}
-            className="px-3 py-1.5 text-sm border rounded-lg disabled:opacity-40 hover:bg-gray-50"
-          >
-            上一页
-          </button>
-          {pageNumbers.map((p, i) =>
-            p === '...' ? (
-              <span key={`ellipsis-${i}`} className="px-2 text-gray-400">…</span>
-            ) : (
-              <button
-                key={p}
-                onClick={() => goToPage(p as number)}
-                className={`w-8 h-8 text-sm rounded-lg ${
-                  p === currentPage
-                    ? 'bg-blue-600 text-white'
-                    : 'border hover:bg-gray-50 text-gray-700'
-                }`}
-              >
-                {p}
-              </button>
-            ),
-          )}
-          <button
-            onClick={nextPage}
-            disabled={!hasNext}
-            className="px-3 py-1.5 text-sm border rounded-lg disabled:opacity-40 hover:bg-gray-50"
-          >
-            下一页
-          </button>
-        </div>
-      )}
+        {/* 搜索结果提示 */}
+        {search && (
+          <p className="text-sm text-slate-500 mb-4">
+            找到 <span className="font-semibold text-slate-800">{filtered.length}</span> 条结果
+          </p>
+        )}
 
+        {/* ── 列表视图 ─────────────────────────────────── */}
+        {viewMode === 'list' ? (
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="bg-slate-50 border-b border-slate-200">
+                <tr>
+                  <th className="w-10 px-4 py-3 text-left">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.size === currentItems.length && currentItems.length > 0}
+                      onChange={(e) => {
+                        if (e.target.checked) setSelectedIds(new Set(currentItems.map((m) => m.id)));
+                        else setSelectedIds(new Set());
+                      }}
+                      className="rounded"
+                    />
+                  </th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">资料名称</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">类型</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">大小</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">上传者</th>
+                  <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">上传时间</th>
+                  {showStatusColumn && (
+                    <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">阶段</th>
+                  )}
+                  <th className="px-4 py-3 text-left font-semibold text-slate-600 text-xs uppercase tracking-wide">操作</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {currentItems.length === 0 && (
+                  <tr>
+                    <td colSpan={showStatusColumn ? 8 : 7} className="text-center py-16 text-slate-400">暂无数据</td>
+                  </tr>
+                )}
+                {currentItems.map((m) => {
+                  const tc = typeColor(m.type);
+                  return (
+                    <tr key={m.id} className="hover:bg-slate-50 cursor-pointer transition-colors" onClick={() => navigate(`/asset/${m.id}`)}>
+                      <td className="px-4 py-3.5" onClick={(e) => e.stopPropagation()}>
+                        <input type="checkbox" checked={selectedIds.has(m.id)} onChange={() => toggleSelect(m.id)} className="rounded" />
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div className={`w-9 h-9 rounded-lg flex items-center justify-center flex-shrink-0 ${tc.bg}`}>
+                            <FileText className={`w-4 h-4 ${tc.text}`} />
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-medium text-slate-800 truncate max-w-xs">{m.title}</p>
+                            {m.tags.length > 0 && (
+                              <div className="flex gap-1 mt-1 flex-wrap">
+                                {m.tags.slice(0, 3).map((tag) => (
+                                  <span key={tag} className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full">{tag}</span>
+                                ))}
+                                {m.tags.length > 3 && <span className="text-[10px] text-slate-400">+{m.tags.length - 3}</span>}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3.5">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold text-white ${tc.badge}`}>{m.type}</span>
+                      </td>
+                      <td className="px-4 py-3.5 text-slate-500">{m.size}</td>
+                      <td className="px-4 py-3.5 text-slate-500">{m.uploader}</td>
+                      <td className="px-4 py-3.5 text-slate-400">{m.uploadTime}</td>
+                      {showStatusColumn && (
+                        <td className="px-4 py-3.5">
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2">
+                              <StatusBadge status={m.status} />
+                              <span className="text-xs text-slate-600">{getStageSummary(m).label}</span>
+                            </div>
+                            {getStageSummary(m).detail && (
+                              <div className="text-[10px] text-slate-400 truncate max-w-xs" title={getStageSummary(m).detail}>
+                                {getStageSummary(m).detail}
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      )}
+                      <td className="px-4 py-3.5" onClick={(e) => e.stopPropagation()}>
+                        <button
+                          onClick={(e) => handleDelete(e, m.id)}
+                          className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          title="删除"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          /* ── 网格视图 ─────────────────────────────────── */
+          <div className="grid grid-cols-2 gap-5 md:grid-cols-3 lg:grid-cols-3">
+            {currentItems.map((m) => {
+              const tc = typeColor(m.type);
+              return (
+                <div
+                  key={m.id}
+                  onClick={() => navigate(`/asset/${m.id}`)}
+                  className="bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-lg transition-shadow cursor-pointer group"
+                >
+                  {/* 缩略图区域 */}
+                  <div className="relative aspect-video bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center">
+                    <FileText className={`w-14 h-14 ${tc.text} opacity-30`} />
+                    <div className="absolute top-3 left-3">
+                      <span className={`px-2.5 py-1 rounded-full text-[10px] font-bold text-white ${tc.badge}`}>{m.type}</span>
+                    </div>
+                    <div className="absolute top-3 right-3">
+                      {m.status === 'pending' && (
+                        <span className="px-2.5 py-1 bg-yellow-100 text-yellow-700 text-[10px] font-semibold rounded-full flex items-center gap-1">
+                          <Clock className="w-3 h-3" /> 待处理
+                        </span>
+                      )}
+                      {m.status === 'processing' && (
+                        <span className="px-2.5 py-1 bg-purple-100 text-purple-700 text-[10px] font-semibold rounded-full flex items-center gap-1">
+                          <Cpu className="w-3 h-3 animate-spin" /> 处理中
+                        </span>
+                      )}
+                      {m.status === 'completed' && (
+                        <span className="px-2.5 py-1 bg-green-100 text-green-700 text-[10px] font-semibold rounded-full flex items-center gap-1">
+                          <CheckCircle className="w-3 h-3" /> 已完成
+                        </span>
+                      )}
+                    </div>
+                    <div className="absolute top-3 left-14" onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.has(m.id)}
+                        onChange={() => toggleSelect(m.id)}
+                        className="rounded"
+                      />
+                    </div>
+                  </div>
+
+                  {/* 内容 */}
+                  <div className="p-4">
+                    <h3 className="text-sm font-semibold text-slate-900 line-clamp-1 group-hover:text-blue-600 transition-colors mb-1">
+                      {m.title}
+                    </h3>
+                    <div className="flex items-center justify-between text-xs text-slate-500 mb-3">
+                      <span>{m.size}</span>
+                      <span>{m.uploadTime}</span>
+                    </div>
+                    {m.tags.length > 0 && (
+                      <div className="flex gap-1 flex-wrap">
+                        {m.tags.slice(0, 2).map((tag) => (
+                          <span key={tag} className="text-[10px] bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded-full">{tag}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            {currentItems.length === 0 && (
+              <div className="col-span-3 text-center py-16 text-slate-400">暂无数据</div>
+            )}
+          </div>
+        )}
+
+        {/* ── 分页 ─────────────────────────────────── */}
+        {totalPages > 1 && (
+          <div className="flex items-center justify-center gap-1 pt-6">
+            <button onClick={prevPage} disabled={!hasPrev} className="px-3 py-1.5 text-sm border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50 transition-colors">
+              上一页
+            </button>
+            {pageNumbers.map((p, i) =>
+              p === '...' ? (
+                <span key={`ellipsis-${i}`} className="px-2 text-slate-400">…</span>
+              ) : (
+                <button
+                  key={p}
+                  onClick={() => goToPage(p as number)}
+                  className={`w-8 h-8 text-sm rounded-lg transition-colors ${
+                    p === currentPage ? 'bg-blue-600 text-white' : 'border border-slate-200 hover:bg-slate-50 text-slate-600'
+                  }`}
+                >
+                  {p}
+                </button>
+              ),
+            )}
+            <button onClick={nextPage} disabled={!hasNext} className="px-3 py-1.5 text-sm border border-slate-200 rounded-lg disabled:opacity-40 hover:bg-slate-50 transition-colors">
+              下一页
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }
