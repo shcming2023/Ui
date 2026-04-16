@@ -2,12 +2,12 @@
  * proxy-server.mjs — 局域网访问反向代理
  *
  * 监听 0.0.0.0:8081，路由规则：
- *   /api/upload/*  →  upload-server (localhost:8788)
- *   /api/db/*      →  db-server     (localhost:8789)
- *   /health        →  本地健康检查
- *   /minio/*       →  MinIO API     (MINIO_HOST:9000)
- *   /__proxy/*     →  按子路径代理外部服务
- *   /*             →  dist/ 静态文件 (SPA fallback to index.html)
+ *   /__proxy/upload/*  →  upload-server (localhost:8788)
+ *   /__proxy/db/*      →  db-server     (localhost:8789)（注入 X-Internal-Token 头）
+ *   /health            →  本地健康检查
+ *   /minio/*           →  MinIO API     (MINIO_HOST:9000)
+ *   /__proxy/*         →  按子路径代理外部服务
+ *   /*                 →  dist/ 静态文件 (SPA fallback to index.html)
  *
  * 用法：
  *   node server/proxy-server.mjs
@@ -20,6 +20,8 @@
  *   MINIO_PORT           MinIO API 端口，默认 9000
  *   MINERU_HOST          MinerU 服务主机，默认 192.168.31.33
  *   MINERU_PORT          MinerU 服务端口，默认 8083
+ *   INTERNAL_API_TOKEN   内网服务间共享密钥（db-server 同值），防止 db-server 裸露
+ *   NODE_ENV             设为 production 时启用 HTTPS 证书校验
  */
 
 import http from 'http';
@@ -39,6 +41,13 @@ const MINIO_HOST  = process.env.MINIO_HOST || '192.168.31.33';
 const MINIO_PORT  = Number(process.env.MINIO_PORT  || 9000);
 const MINERU_HOST = process.env.MINERU_HOST || '192.168.31.33';
 const MINERU_PORT = Number(process.env.MINERU_PORT || 8083);
+
+// 内网服务间共享密钥，转发到 db-server 时自动注入 X-Internal-Token 头
+// db-server 须配置相同值的 INTERNAL_API_TOKEN 环境变量
+const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN || '';
+
+// 生产模式下启用 HTTPS 证书校验
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 
 // MIME 类型映射
 const MIME = {
@@ -86,9 +95,10 @@ function proxyRequest(req, res, options) {
 
 /**
  * 代理到 HTTPS 目标
+ * 生产模式（NODE_ENV=production）启用证书校验；开发/UAT 模式关闭，兼容自签名证书。
  */
 function proxyHttpsRequest(req, res, options) {
-  const proxyReq = https.request({ ...options, rejectUnauthorized: false }, (proxyRes) => {
+  const proxyReq = https.request({ ...options, rejectUnauthorized: IS_PRODUCTION }, (proxyRes) => {
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
     proxyRes.pipe(res);
   });
@@ -116,6 +126,15 @@ function serveStatic(req, res) {
   }
 
   const filePath = path.join(DIST_DIR, urlPath);
+
+  // ── 路径越界检查：防止 ../../ 路径遍历 ──────────────────────
+  const resolvedPath = path.resolve(filePath);
+  const resolvedDist = path.resolve(DIST_DIR);
+  if (!resolvedPath.startsWith(resolvedDist + path.sep) && resolvedPath !== resolvedDist) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('400 Bad Request\n');
+    return;
+  }
 
   // 尝试直接访问文件
   const tryFile = (fp) => {
@@ -183,12 +202,17 @@ const server = http.createServer((req, res) => {
   // ── db-server：/__proxy/db/* → db-server（strip 前缀）──
   if (url.startsWith('/__proxy/db')) {
     const backendPath = url.replace(/^\/__proxy\/db/, '') || '/';
+    // 注入内网 Token，db-server 凭此验证请求来自受信任的 proxy
+    const dbHeaders = { ...req.headers, host: `localhost:${DB_PORT}` };
+    if (INTERNAL_API_TOKEN) {
+      dbHeaders['x-internal-token'] = INTERNAL_API_TOKEN;
+    }
     proxyRequest(req, res, {
       host: 'localhost',
       port: DB_PORT,
       path: backendPath,
       method,
-      headers: { ...req.headers, host: `localhost:${DB_PORT}` },
+      headers: dbHeaders,
     });
     return;
   }
@@ -282,11 +306,13 @@ server.listen(PROXY_PORT, '0.0.0.0', () => {
 ╠══════════════════════════════════════════════════════╣
 ║  访问地址：http://192.168.31.33:${PROXY_PORT}              ║
 ║  代理规则：                                           ║
-║    /minio/*          → MinIO (${MINIO_HOST}:${MINIO_PORT})    ║
-║    /upload/* /parse  → upload-server (:${UPLOAD_PORT})     ║
-║    /settings /list   → upload-server (:${UPLOAD_PORT})     ║
-║    /assets /tags     → db-server (:${DB_PORT})         ║
-║    /*                → dist/ 静态文件 (SPA)           ║
+║    /minio/*              → MinIO (${MINIO_HOST}:${MINIO_PORT})    ║
+║    /__proxy/upload/*     → upload-server (:${UPLOAD_PORT})     ║
+║    /__proxy/db/*         → db-server (:${DB_PORT})         ║
+║    /__proxy/mineru*      → MinerU (外部 API)          ║
+║    /__proxy/kimi*        → Kimi AI API               ║
+║    /__proxy/moonshot*    → Moonshot AI API           ║
+║    /*                    → dist/ 静态文件 (SPA)      ║
 ╚══════════════════════════════════════════════════════╝
 `);
 });

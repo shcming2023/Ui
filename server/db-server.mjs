@@ -30,7 +30,21 @@ const DATA_PATH = (() => {
   }
 })();
 
-app.use(cors());
+// ─── CORS 配置 ────────────────────────────────────────────────
+// 生产部署时通过 CORS_ORIGIN 环境变量指定允许的来源（逗号分隔）
+const CORS_ORIGIN_RAW = process.env.CORS_ORIGIN || '';
+const ALLOWED_CORS_ORIGINS = CORS_ORIGIN_RAW
+  ? CORS_ORIGIN_RAW.split(',').map((s) => s.trim()).filter(Boolean)
+  : [];
+
+app.use(cors(ALLOWED_CORS_ORIGINS.length > 0 ? {
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (ALLOWED_CORS_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+} : undefined));
 app.use(express.json({ limit: '20mb' }));
 
 function redactSensitive(value) {
@@ -167,6 +181,21 @@ app.get('/stats', (_req, res) => {
   });
 });
 
+// ─── 内网 Token 校验中间件 ────────────────────────────────────
+// 通过 INTERNAL_API_TOKEN 环境变量配置共享密钥，proxy-server 转发时注入 X-Internal-Token 头
+// 未配置时跳过检查（向后兼容，开发环境无需配置）
+const INTERNAL_API_TOKEN = process.env.INTERNAL_API_TOKEN || '';
+
+app.use((req, res, next) => {
+  if (!INTERNAL_API_TOKEN) return next(); // 未配置则不校验
+  const token = req.headers['x-internal-token'];
+  if (token !== INTERNAL_API_TOKEN) {
+    res.status(401).json({ error: '未授权：缺少或无效的内部访问令牌' });
+    return;
+  }
+  next();
+});
+
 // ─── 输入验证工具 ─────────────────────────────────────────
 
 /**
@@ -182,11 +211,25 @@ function requireBody(req, res, next) {
 }
 
 /**
- * 防止原型链污染：拒绝包含 __proto__、constructor、prototype 等危险键的请求体。
+ * 防止原型链污染：递归检查对象中是否包含危险键名。
+ * 比 JSON.stringify().includes() 更精确：
+ * - 避免误拦截合法字段值（如 "constructor" 出现在字符串值中）
+ * - 避免漏检深层嵌套中的危险键
  */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function hasDangerousKey(value, depth = 0) {
+  if (depth > 20) return false; // 防止超深嵌套消耗过多资源
+  if (value === null || typeof value !== 'object') return false;
+  for (const key of Object.keys(value)) {
+    if (DANGEROUS_KEYS.has(key)) return true;
+    if (hasDangerousKey(value[key], depth + 1)) return true;
+  }
+  return false;
+}
+
 function rejectProtoPollution(req, res, next) {
-  const raw = JSON.stringify(req.body);
-  if (raw && (raw.includes('"__proto__"') || raw.includes('"constructor"') || raw.includes('"prototype"'))) {
+  if (req.body && hasDangerousKey(req.body)) {
     res.status(400).json({ error: '请求体包含不允许的属性名' });
     return;
   }
@@ -427,12 +470,22 @@ app.delete('/ai-rules', (req, res) => {
 
 // ─── Settings ─────────────────────────────────────────────────
 
+// settings key 白名单：只允许已知业务 key 写入，防止任意键污染
+const ALLOWED_SETTINGS_KEYS = new Set([
+  'aiConfig', 'aiRuleSettings', 'mineruConfig', 'minioConfig',
+  'uiPreferences', 'systemConfig', 'backupConfig',
+]);
+
 app.get('/settings', (_req, res) => {
   res.json(dbCache.settings);
 });
 
 app.put('/settings/:key', (req, res) => {
   const { key } = req.params;
+  if (!ALLOWED_SETTINGS_KEYS.has(key)) {
+    res.status(400).json({ error: `settings key "${key}" 不在允许列表内` });
+    return;
+  }
   dbCache.settings[key] = req.body;
   writeDB();
   res.json({ ok: true, key });

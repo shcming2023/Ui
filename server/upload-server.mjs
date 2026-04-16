@@ -83,13 +83,174 @@ function fixFilenameEncoding(filename) {
   return filename;
 }
 
-app.use(cors());
+// ─── CORS 配置 ────────────────────────────────────────────────
+// 生产部署时请通过 CORS_ORIGIN 环境变量指定允许的来源（如 http://192.168.1.100:8081）
+// 多个来源用逗号分隔。未配置时默认仅允许 localhost 开发端口。
+const CORS_ORIGIN_RAW = process.env.CORS_ORIGIN || '';
+const ALLOWED_CORS_ORIGINS = CORS_ORIGIN_RAW
+  ? CORS_ORIGIN_RAW.split(',').map((s) => s.trim()).filter(Boolean)
+  : [];
+
+app.use(cors(ALLOWED_CORS_ORIGINS.length > 0 ? {
+  origin: (origin, callback) => {
+    // 无 Origin 头（服务间调用、curl）直接放行
+    if (!origin) return callback(null, true);
+    if (ALLOWED_CORS_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error(`CORS: origin ${origin} not allowed`));
+  },
+  credentials: true,
+} : undefined)); // CORS_ORIGIN 未配置时保持原有行为（兼容开发环境）
+
 app.use(express.json());
 app.use((req, res, next) => {
   const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   req.requestId = requestId;
   res.setHeader('X-Request-Id', requestId);
   next();
+});
+
+// ─── SSRF 防御工具 ────────────────────────────────────────────
+
+/**
+ * 检查 URL 是否为私网/回环地址（防止 SSRF 内网横向访问）
+ * 拦截：localhost、127.x.x.x、10.x.x.x、172.16-31.x.x、192.168.x.x、::1 等
+ */
+function isPrivateOrLoopback(hostname) {
+  if (!hostname) return true;
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, ''); // 去除 IPv6 括号
+  if (h === 'localhost' || h === '::1' || h === '0.0.0.0') return true;
+  if (/^127\./.test(h)) return true;
+  if (/^10\./.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+  if (/^192\.168\./.test(h)) return true;
+  if (/^169\.254\./.test(h)) return true; // link-local
+  if (/^fd[0-9a-f]{2}:/i.test(h)) return true; // IPv6 ULA
+  return false;
+}
+
+/**
+ * 校验 ossUrl 是否合法（仅允许 HTTPS 且目标为阿里云 OSS 域名）
+ * 阿里云 OSS presigned URL 格式：https://<bucket>.oss-<region>.aliyuncs.com/...
+ * MinerU 的 OSS 也在 aliyuncs.com 下。
+ *
+ * 生产部署如需放行其他 OSS 域名，可通过 ALLOWED_OSS_DOMAINS 环境变量（逗号分隔）追加。
+ */
+const EXTRA_OSS_DOMAINS = (process.env.ALLOWED_OSS_DOMAINS || '')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
+function validateOssUrl(url) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, reason: 'URL 格式无效' };
+  }
+  if (parsed.protocol !== 'https:') {
+    return { ok: false, reason: '仅允许 HTTPS 协议' };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (isPrivateOrLoopback(host)) {
+    return { ok: false, reason: '不允许访问私网或回环地址' };
+  }
+  const ossAllowed = host.endsWith('.aliyuncs.com') || EXTRA_OSS_DOMAINS.some((d) => host.endsWith(d));
+  if (!ossAllowed) {
+    return { ok: false, reason: `域名 ${host} 不在 OSS 白名单内（允许 *.aliyuncs.com）` };
+  }
+  return { ok: true };
+}
+
+/**
+ * 校验 AI API endpoint 是否合法（防止 SSRF 任意外部请求转发）
+ *
+ * 策略：
+ * - 仅允许 http/https 协议
+ * - 拒绝私网地址（除非显式配置 ALLOW_LOCAL_AI_ENDPOINT=true，用于 Ollama 本地模式）
+ * - 可通过 ALLOWED_AI_HOSTS 环境变量（逗号分隔）限制允许的外部主机
+ */
+const ALLOW_LOCAL_AI = process.env.ALLOW_LOCAL_AI_ENDPOINT === 'true';
+const ALLOWED_AI_HOSTS_RAW = (process.env.ALLOWED_AI_HOSTS || '').split(',').map((s) => s.trim()).filter(Boolean);
+
+function validateAiEndpoint(endpoint) {
+  let parsed;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    return { ok: false, reason: 'AI endpoint URL 格式无效' };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    return { ok: false, reason: '仅允许 http/https 协议' };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (isPrivateOrLoopback(host) && !ALLOW_LOCAL_AI) {
+    return { ok: false, reason: `AI endpoint 不允许访问本地/私网地址（${host}）。如需使用本地 Ollama，请设置 ALLOW_LOCAL_AI_ENDPOINT=true` };
+  }
+  // 如果配置了主机白名单，必须在白名单内
+  if (ALLOWED_AI_HOSTS_RAW.length > 0) {
+    const allowed = ALLOWED_AI_HOSTS_RAW.some((h) => host === h || host.endsWith(`.${h}`));
+    if (!allowed) {
+      return { ok: false, reason: `AI endpoint 主机 ${host} 不在白名单内` };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * 校验任意 fetch URL（通用，用于 zipUrl 等场景）
+ * 允许 https，拒绝私网地址。
+ */
+function validateFetchUrl(url, { allowHttp = false } = {}) {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { ok: false, reason: 'URL 格式无效' };
+  }
+  if (parsed.protocol === 'file:' || parsed.protocol === 'data:') {
+    return { ok: false, reason: `不允许 ${parsed.protocol} 协议` };
+  }
+  if (!allowHttp && parsed.protocol !== 'https:') {
+    return { ok: false, reason: '仅允许 HTTPS 协议' };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (isPrivateOrLoopback(host)) {
+    return { ok: false, reason: '不允许访问私网或回环地址' };
+  }
+  return { ok: true };
+}
+
+// ─── 原型链污染防御（与 db-server 共享同一逻辑）──────────────
+
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * 递归检查对象中是否包含危险键名（原型链污染防御）
+ * 比 JSON.stringify().includes() 更精确，避免误拦截合法的 "constructor" 字段值
+ */
+function hasDangerousKey(value, depth = 0) {
+  if (depth > 20) return false; // 防止超深嵌套消耗过多资源
+  if (value === null || typeof value !== 'object') return false;
+  for (const key of Object.keys(value)) {
+    if (DANGEROUS_KEYS.has(key)) return true;
+    if (hasDangerousKey(value[key], depth + 1)) return true;
+  }
+  return false;
+}
+
+function rejectProtoPollution(req, res, next) {
+  if (req.body && hasDangerousKey(req.body)) {
+    res.status(400).json({ error: '请求体包含不允许的属性名' });
+    return;
+  }
+  next();
+}
+
+// 对所有写操作应用原型链污染防护
+app.use((req, res, next) => {
+  if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body && typeof req.body === 'object') {
+    rejectProtoPollution(req, res, next);
+  } else {
+    next();
+  }
 });
 
 // ─── MinIO Presigned URL 公开地址重写 ─────────────────────────
@@ -754,6 +915,16 @@ app.post('/parse/oss-put', upload.single('file'), async (req, res) => {
   }
   if (!req.file) {
     res.status(400).json({ error: '缺少文件字段 file' });
+    cleanupTempFile(req.file);
+    return;
+  }
+
+  // ── SSRF 校验：ossUrl 必须是阿里云 OSS HTTPS 地址 ─────────
+  const ossCheck = validateOssUrl(ossUrl);
+  if (!ossCheck.ok) {
+    cleanupTempFile(req.file);
+    console.warn(`[upload-server] /parse/oss-put rejected ossUrl: ${ossCheck.reason}`);
+    res.status(400).json({ error: `ossUrl 校验失败: ${ossCheck.reason}` });
     return;
   }
 
@@ -795,6 +966,14 @@ app.post('/parse/download', async (req, res) => {
 
   if (!zipUrl || !materialId) {
     res.status(400).json({ error: '缺少 zipUrl 或 materialId' });
+    return;
+  }
+
+  // ── 校验 zipUrl（防止 SSRF）──────────────────────────────────
+  const zipCheck = validateFetchUrl(zipUrl, { allowHttp: false });
+  if (!zipCheck.ok) {
+    console.warn(`[upload-server] /parse/download rejected zipUrl: ${zipCheck.reason}`);
+    res.status(400).json({ error: `zipUrl 校验失败: ${zipCheck.reason}` });
     return;
   }
 
@@ -1366,6 +1545,18 @@ async function callAiProvider(provider, systemPrompt, userPrompt) {
   const trimmedKey = (provider.apiKey || '').trim();
   const trimmedEndpoint = (provider.apiEndpoint || '').trim();
   const trimmedModel = (provider.model || '').trim();
+
+  if (!trimmedEndpoint) {
+    throw new Error('AI endpoint 未配置');
+  }
+
+  // ── SSRF 校验：aiEndpoint 必须通过安全检查 ────────────────────
+  const endpointCheck = validateAiEndpoint(trimmedEndpoint);
+  if (!endpointCheck.ok) {
+    const err = new Error(`AI endpoint 校验失败: ${endpointCheck.reason}`);
+    err.httpStatus = 400;
+    throw err;
+  }
 
   const aiFullUrl = /\/chat\/completions\/?$/.test(trimmedEndpoint)
     ? trimmedEndpoint
