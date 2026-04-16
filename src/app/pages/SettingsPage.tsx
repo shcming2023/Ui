@@ -657,6 +657,23 @@ export function SettingsPage() {
                 onChange={(v) => updateAi({ maxMarkdownChars: Number(v) })}
               />
             </FieldRow>
+            <FieldRow
+              label="深度思考模式"
+              hint="启用后，Qwen3 等支持 thinking mode 的模型会先进行深度思考再输出结果，可提高复杂文档的分析质量，但会显著增加处理时间和 token 消耗。关闭时添加 /no_think 指令以禁用思考过程。"
+            >
+              <button
+                type="button"
+                onClick={() => updateAi({ enableThinking: !aiForm.enableThinking })}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                  aiForm.enableThinking
+                    ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                    : 'bg-gray-100 text-gray-500 border border-gray-200'
+                }`}
+              >
+                {aiForm.enableThinking ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
+                {aiForm.enableThinking ? '已启用' : '已禁用'}
+              </button>
+            </FieldRow>
           </div>
 
           {/* 多提供商列表 */}

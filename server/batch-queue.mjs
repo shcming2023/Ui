@@ -548,11 +548,12 @@ ${mdContext}
 2. confidence 必须是 0-100 的整数
 3. 仅返回 JSON，不要有任何前缀或解释文字`;
 
+  const enableThinking = aiConfig.enableThinking === true;
   const { result: extracted, providerId, providerName } = await deps.analyzeWithFallback(
     providers,
     systemPrompt,
     userPrompt,
-    { maxRetries: 2, retryDelay: 1000 },
+    { maxRetries: 2, retryDelay: 1000, enableThinking },
   );
 
   const aiResult = {

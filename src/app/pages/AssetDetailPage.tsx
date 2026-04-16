@@ -1148,6 +1148,7 @@ export function AssetDetailPage() {
                 aiModel: model,
               }),
           prompts: state.aiConfig.prompts,
+          enableThinking: state.aiConfig.enableThinking === true,
         }),
       });
 

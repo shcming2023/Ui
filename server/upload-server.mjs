@@ -1670,9 +1670,11 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
  * @param {object} provider - 提供商配置 { id, name, apiEndpoint, apiKey, model, timeout }
  * @param {string} systemPrompt
  * @param {string} userPrompt
+ * @param {{ enableThinking?: boolean }} opts - 可选参数
  * @returns {Promise<object>} 解析后的 JSON 结果
  */
-async function callAiProvider(provider, systemPrompt, userPrompt) {
+async function callAiProvider(provider, systemPrompt, userPrompt, opts = {}) {
+  const enableThinking = opts.enableThinking ?? false;
   const trimmedKey = (provider.apiKey || '').trim();
   let trimmedEndpoint = (provider.apiEndpoint || '').trim();
   const trimmedModel = (provider.model || '').trim();
@@ -1712,11 +1714,19 @@ async function callAiProvider(provider, systemPrompt, userPrompt) {
       body: JSON.stringify({
         model: trimmedModel,
         messages: [
-          { role: 'system', content: systemPrompt },
+          {
+            role: 'system',
+            // enableThinking=false 时添加 /no_think 指令，禁用 Qwen3 的 thinking mode
+            // enableThinking=true 时保持原始 prompt，允许模型深度思考
+            content: enableThinking ? systemPrompt : (systemPrompt + '\n/no_think'),
+          },
           { role: 'user', content: userPrompt },
         ],
         temperature: 0.1,
-        max_tokens: 1024,
+        // thinking mode 开启时需要更多 token（思考过程 + 实际回答）
+        max_tokens: enableThinking ? 4096 : 2048,
+        // Ollama 特有参数：控制 thinking mode（对非 Ollama 服务无影响）
+        think: enableThinking,
       }),
       signal: aiController.signal,
     });
@@ -1733,16 +1743,79 @@ async function callAiProvider(provider, systemPrompt, userPrompt) {
   }
 
   const aiJson = await aiResp.json();
-  const rawContent = aiJson.choices?.[0]?.message?.content ?? '';
-  const jsonStr = rawContent.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+  // Ollama Qwen3 可能将思考内容放在 content 中，实际回答可能在同一字段或单独字段
+  const message = aiJson.choices?.[0]?.message ?? {};
+  const rawContent = message.content ?? '';
+  // 某些 Ollama 版本可能将思考内容放在 reasoning_content 中
+  if (!rawContent && message.reasoning_content) {
+    console.warn('[upload-server] AI response has reasoning_content but empty content, model may need /no_think');
+  }
 
-  let extracted;
-  try {
-    extracted = JSON.parse(jsonStr);
-  } catch {
-    throw new Error(`AI 返回格式异常，无法解析为 JSON。原始响应：${rawContent.slice(0, 200)}`);
+  // ── 健壮的 JSON 提取：兼容 Qwen3 thinking mode、markdown 代码块等 ──
+  const extracted = extractJsonFromAiResponse(rawContent);
+  if (!extracted || typeof extracted !== 'object') {
+    throw new Error(`AI 返回格式异常，无法解析为 JSON。原始响应：${rawContent.slice(0, 300)}`);
   }
   return extracted;
+}
+
+/**
+ * 从 AI 响应文本中健壮地提取 JSON 对象。
+ * 兼容以下情况：
+ *   1. 纯 JSON 字符串
+ *   2. Markdown 代码块包裹的 JSON（```json ... ```）
+ *   3. Qwen3 thinking mode（<think>...</think> 前缀）
+ *   4. 混合了思考文本和 JSON 的响应
+ *   5. 多余的前后文字说明
+ */
+function extractJsonFromAiResponse(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+
+  // Step 1: 去除 <think>...</think> 标签（Qwen3 thinking mode）
+  // 支持多个 think 块和嵌套换行
+  let cleaned = raw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+  // Step 2: 如果清理后为空，尝试用原始内容
+  if (!cleaned) cleaned = raw.trim();
+
+  // Step 3: 尝试直接解析（最理想情况）
+  try {
+    const direct = JSON.parse(cleaned);
+    if (typeof direct === 'object' && direct !== null) return direct;
+  } catch { /* continue */ }
+
+  // Step 4: 去除 markdown 代码块标记
+  const codeBlockMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (codeBlockMatch) {
+    try {
+      const fromBlock = JSON.parse(codeBlockMatch[1].trim());
+      if (typeof fromBlock === 'object' && fromBlock !== null) return fromBlock;
+    } catch { /* continue */ }
+  }
+
+  // Step 5: 查找第一个 { 和最后一个 } 之间的内容（贪心匹配）
+  const firstBrace = cleaned.indexOf('{');
+  const lastBrace = cleaned.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    const candidate = cleaned.slice(firstBrace, lastBrace + 1);
+    try {
+      const fromBrace = JSON.parse(candidate);
+      if (typeof fromBrace === 'object' && fromBrace !== null) return fromBrace;
+    } catch { /* continue */ }
+  }
+
+  // Step 6: 最后尝试在原始文本中查找（可能 think 标签去除不完整）
+  const firstBraceRaw = raw.indexOf('{');
+  const lastBraceRaw = raw.lastIndexOf('}');
+  if (firstBraceRaw !== -1 && lastBraceRaw > firstBraceRaw) {
+    const candidateRaw = raw.slice(firstBraceRaw, lastBraceRaw + 1);
+    try {
+      const fromRaw = JSON.parse(candidateRaw);
+      if (typeof fromRaw === 'object' && fromRaw !== null) return fromRaw;
+    } catch { /* continue */ }
+  }
+
+  return null;
 }
 
 /**
@@ -1750,12 +1823,13 @@ async function callAiProvider(provider, systemPrompt, userPrompt) {
  * @param {object[]} providers - 已过滤且按 priority 排序的提供商列表
  * @param {string} systemPrompt
  * @param {string} userPrompt
- * @param {{ maxRetries?: number, retryDelay?: number }} opts
+ * @param {{ maxRetries?: number, retryDelay?: number, enableThinking?: boolean }} opts
  * @returns {Promise<{ result: object, providerId: string, providerName: string }>}
  */
 async function analyzeWithFallback(providers, systemPrompt, userPrompt, opts = {}) {
   const maxRetries = opts.maxRetries ?? 2;
   const retryDelay = opts.retryDelay ?? 1000;
+  const enableThinking = opts.enableThinking ?? false;
   const errors = [];
 
   for (const provider of providers) {
@@ -1763,7 +1837,7 @@ async function analyzeWithFallback(providers, systemPrompt, userPrompt, opts = {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const result = await callAiProvider(provider, systemPrompt, userPrompt);
+        const result = await callAiProvider(provider, systemPrompt, userPrompt, { enableThinking });
         console.log(`[upload-server] AI provider ${provider.name} succeeded on attempt ${attempt}`);
         return { result, providerId: provider.id, providerName: provider.name };
       } catch (err) {
@@ -1838,6 +1912,8 @@ app.post('/ai/test', async (req, res) => {
       },
       systemPrompt,
       userPrompt,
+      // 测试时始终禁用 thinking mode，确保快速响应
+      { enableThinking: false },
     );
     const ok = result && typeof result === 'object' && result.ok === true;
     res.json({
@@ -1867,6 +1943,7 @@ app.post('/parse/analyze', async (req, res) => {
     prompts,
     maxRetries,
     retryDelay,
+    enableThinking,
   } = req.body;
 
   if (!materialId) {
@@ -1993,7 +2070,7 @@ ${mdContext}
       providers,
       systemPrompt,
       userPrompt,
-      { maxRetries: maxRetries ?? 2, retryDelay: retryDelay ?? 1000 },
+      { maxRetries: maxRetries ?? 2, retryDelay: retryDelay ?? 1000, enableThinking: enableThinking === true },
     );
 
     // ── 4. 组装响应 ────────────────────────────────────────────

@@ -487,6 +487,7 @@ export function BatchProcessingController() {
                   aiModel: model,
                 }),
             prompts: state.aiConfig.prompts,
+            enableThinking: state.aiConfig.enableThinking === true,
           }),
           timeoutMs: Math.max(60_000, (state.aiConfig.timeout || 300) * 1000 + 30_000),
         });
