@@ -1,5 +1,20 @@
 # Changelog
 
+## [milestone-6.6] - 2026-04-16
+
+### 🧩 Docker 刷新后预览修复（PDF/Markdown）
+
+#### 修复内容
+- **Markdown 预览刷新恢复**：`/presign` 支持按 objectName 自动选择 parsedBucket，并返回同源 `proxy-file` URL，避免刷新后 `markdownObjectName` 指向错误 bucket 导致预览空白。
+- **PDF 预览不再触发下载**：`/proxy-file` 在 MinIO 元数据为 `octet-stream` 时按扩展名兜底 `Content-Type`（PDF → `application/pdf`），避免被 Nginx `X-Content-Type-Options: nosniff` 影响而触发下载。
+- **PDF Viewer 兼容性增强**：`/proxy-file` 支持 Range（字节范围）读取（`206 Partial Content`），提升 Chrome/Edge iframe 内嵌预览稳定性。
+
+#### 影响范围
+- Docker 部署环境下的资产详情页 PDF iframe 预览
+- Docker 部署环境下的 Markdown 预览（刷新后）
+
+---
+
 ## [v0.7.0] - 2026-04-14
 
 ### 🎉 Docker 部署首次验证通过 (Milestone)

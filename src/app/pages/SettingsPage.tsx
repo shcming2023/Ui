@@ -45,6 +45,23 @@ type BackupConfirmState =
   | { kind: 'json'; fileName: string; data: unknown }
   | { kind: 'full'; fileName: string; file: File; mode: 'replace' | 'merge' };
 
+type ImportResult = {
+  mode: 'replace' | 'merge' | 'json';
+  importedObjects?: number;
+  removedExistingObjects?: number;
+  skippedObjects?: number;
+  materialsCount?: number;
+  backupPath?: string;
+};
+
+type OrphanObject = { bucket: string; objectName: string; size: number };
+
+type OrphanStats = {
+  orphans: OrphanObject[];
+  totalCount: number;
+  totalSize: number;
+};
+
 function FieldRow({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) {
   return (
     <div className="flex items-start gap-4">
@@ -191,7 +208,14 @@ export function SettingsPage() {
   const [savingCapacity, setSavingCapacity] = useState(false);
   const [fullImportMode, setFullImportMode] = useState<'replace' | 'merge'>('replace');
   const [confirmState, setConfirmState] = useState<BackupConfirmState | null>(null);
+  const [confirmInput, setConfirmInput] = useState('');
   const [exportingFull, setExportingFull] = useState(false);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  // 孤儿对象审计
+  const [orphanStats, setOrphanStats] = useState<OrphanStats | null>(null);
+  const [orphanLoading, setOrphanLoading] = useState(false);
+  const [cleaningOrphans, setCleaningOrphans] = useState(false);
+  const [orphanConfirmOpen, setOrphanConfirmOpen] = useState(false);
 
   // 切换到 storage tab 时从 upload-server 读取最新配置
   useEffect(() => {
@@ -367,6 +391,43 @@ export function SettingsPage() {
     window.setTimeout(() => window.location.reload(), 1200);
   };
 
+  const handleScanOrphans = async () => {
+    setOrphanLoading(true);
+    setOrphanStats(null);
+    try {
+      const resp = await fetch('/__proxy/upload/audit/orphans');
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      setOrphanStats({ orphans: data.orphans || [], totalCount: data.totalCount || 0, totalSize: data.totalSize || 0 });
+    } catch (error) {
+      toast.error(`扫描失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setOrphanLoading(false);
+    }
+  };
+
+  const handleCleanupOrphans = async () => {
+    setCleaningOrphans(true);
+    setOrphanConfirmOpen(false);
+    try {
+      const resp = await fetch('/__proxy/upload/audit/cleanup-orphans', { method: 'POST' });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+      const errCount = Array.isArray(data.errors) ? data.errors.length : 0;
+      if (errCount > 0) {
+        toast.warning(`清理完成：已删除 ${data.removed} 个对象，${errCount} 个对象删除失败`);
+      } else {
+        toast.success(`清理完成：已删除 ${data.removed} 个孤儿对象，释放 ${formatBytes(data.totalSize || 0)}`);
+      }
+      setOrphanStats(null);
+      void refreshBackupStats();
+    } catch (error) {
+      toast.error(`清理失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setCleaningOrphans(false);
+    }
+  };
+
   const handleExportBackup = async () => {
     try {
       const response = await fetch('/__proxy/db/backup/export');
@@ -396,6 +457,15 @@ export function SettingsPage() {
     try {
       const text = await file.text();
       const data = JSON.parse(text);
+      // 前置校验：必须含有 materials 字段且为 object（非数组）
+      if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        toast.error('导入失败：JSON 文件不是合法的对象');
+        return;
+      }
+      if (!('materials' in data) || typeof data.materials !== 'object' || Array.isArray(data.materials)) {
+        toast.error('导入失败：JSON 文件缺少合法的 materials 字段，请确认是否为本系统导出的数据库备份');
+        return;
+      }
       setConfirmState({ kind: 'json', fileName: file.name, data });
     } catch (error) {
       toast.error(`导入失败：${error instanceof Error ? error.message : String(error)}`);
@@ -452,6 +522,15 @@ export function SettingsPage() {
         if (!response.ok) {
           throw new Error(result?.error || `HTTP ${response.status}`);
         }
+        setConfirmState(null);
+        setConfirmInput('');
+        setImportResult({
+          mode: 'json',
+          backupPath: result?.backupPath,
+          materialsCount: typeof (confirmState.data as { materials?: Record<string, unknown> }).materials === 'object'
+            ? Object.keys((confirmState.data as { materials?: Record<string, unknown> }).materials ?? {}).length
+            : undefined,
+        });
       } else {
         const formData = new FormData();
         formData.append('file', confirmState.file);
@@ -464,9 +543,17 @@ export function SettingsPage() {
         if (!response.ok) {
           throw new Error(result?.error || `HTTP ${response.status}`);
         }
+        setConfirmState(null);
+        setConfirmInput('');
+        setImportResult({
+          mode: confirmState.mode,
+          importedObjects: result?.importedObjects,
+          removedExistingObjects: result?.removedExistingObjects,
+          skippedObjects: result?.skippedObjects,
+          materialsCount: result?.materialsCount,
+          backupPath: result?.backupPath,
+        });
       }
-      setConfirmState(null);
-      clearLocalStateAndReload();
     } catch (error) {
       toast.error(`导入失败：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1215,6 +1302,102 @@ export function SettingsPage() {
             </div>
           </div>
 
+          {/* ── 孤儿对象审计 ──────────────────────────────── */}
+          <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold text-gray-800">孤儿对象审计</h2>
+              <button
+                onClick={handleScanOrphans}
+                disabled={orphanLoading}
+                className="flex items-center gap-2 px-3 py-2 text-sm border border-gray-200 rounded-lg text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              >
+                {orphanLoading ? <Loader size={14} className="animate-spin" /> : <ScanLine size={14} />}
+                {orphanLoading ? '扫描中...' : '扫描孤儿对象'}
+              </button>
+            </div>
+            <p className="text-xs text-gray-500">孤儿对象指 MinIO 中存在但数据库无对应记录的文件，通常由删除失败或历史操作残留产生。</p>
+
+            {orphanStats === null && !orphanLoading && (
+              <p className="text-sm text-gray-400">点击"扫描孤儿对象"开始检测</p>
+            )}
+
+            {orphanStats !== null && (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-lg bg-gray-50 px-4 py-3">
+                  <span className="text-sm text-gray-700">发现孤儿对象</span>
+                  <span className={`text-sm font-semibold ${orphanStats.totalCount > 0 ? 'text-amber-600' : 'text-green-600'}`}>
+                    {orphanStats.totalCount} 个（{formatBytes(orphanStats.totalSize)}）
+                  </span>
+                </div>
+
+                {orphanStats.orphans.length > 0 && (
+                  <div className="max-h-48 overflow-y-auto rounded-lg border border-gray-100 divide-y divide-gray-100">
+                    {orphanStats.orphans.slice(0, 50).map((o) => (
+                      <div key={`${o.bucket}/${o.objectName}`} className="flex items-center justify-between px-3 py-2 text-xs text-gray-600 hover:bg-gray-50">
+                        <span className="truncate flex-1 pr-3 font-mono">{o.objectName}</span>
+                        <span className="flex-shrink-0 text-gray-400">{o.bucket} · {formatBytes(o.size)}</span>
+                      </div>
+                    ))}
+                    {orphanStats.orphans.length > 50 && (
+                      <div className="px-3 py-2 text-xs text-gray-400 text-center">
+                        仅展示前 50 条，共 {orphanStats.totalCount} 条
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {orphanStats.totalCount > 0 && (
+                  <div className="space-y-2">
+                    {!orphanConfirmOpen ? (
+                      <button
+                        onClick={() => setOrphanConfirmOpen(true)}
+                        disabled={cleaningOrphans}
+                        className="flex items-center gap-2 px-4 py-2 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                      >
+                        <Trash2 size={14} /> 一键清理孤儿对象
+                      </button>
+                    ) : (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-3">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle size={16} className="mt-0.5 text-amber-600 flex-shrink-0" />
+                          <div>
+                            <p className="text-sm font-semibold text-amber-800">确认清理？</p>
+                            <p className="text-xs text-amber-700 mt-1">
+                              将从 MinIO 中永久删除 <strong>{orphanStats.totalCount}</strong> 个孤儿对象（共 {formatBytes(orphanStats.totalSize)}），此操作不可撤销。
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={handleCleanupOrphans}
+                            disabled={cleaningOrphans}
+                            className="flex items-center gap-2 px-4 py-2 text-sm bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-50"
+                          >
+                            {cleaningOrphans ? <Loader size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                            {cleaningOrphans ? '清理中...' : '确认删除'}
+                          </button>
+                          <button
+                            onClick={() => setOrphanConfirmOpen(false)}
+                            disabled={cleaningOrphans}
+                            className="px-4 py-2 text-sm border border-amber-200 text-amber-700 rounded-lg hover:bg-white disabled:opacity-50"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {orphanStats.totalCount === 0 && (
+                  <div className="flex items-center gap-2 text-sm text-green-600 bg-green-50 border border-green-100 rounded-lg px-4 py-3">
+                    <CheckCircle size={16} /> 未发现孤儿对象，数据一致性良好
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
             <h2 className="font-semibold text-gray-800">备份与恢复</h2>
             <div className="rounded-lg border border-blue-100 bg-blue-50 px-4 py-3 text-sm text-blue-700">
@@ -1289,28 +1472,105 @@ export function SettingsPage() {
                 <AlertTriangle size={18} className="mt-0.5 text-red-600" />
                 <div className="space-y-1">
                   <p className="font-semibold text-red-700">危险操作确认</p>
-                  <p className="text-sm text-red-700">
-                    {confirmState.kind === 'json'
-                      ? '导入元数据 JSON 会覆盖当前数据库，并自动创建 .bak 备份。MinIO 文件不会被恢复。'
-                      : `导入完整资产会${confirmState.mode === 'replace' ? '覆盖数据库与 MinIO 文件' : '补充数据库与 MinIO 中缺失对象'}，导入后页面将自动刷新。`}
-                  </p>
+                  {confirmState.kind === 'json' ? (
+                    <p className="text-sm text-red-700">
+                      导入元数据 JSON 会覆盖当前数据库，并自动创建 .bak 备份。MinIO 文件不会被恢复。
+                    </p>
+                  ) : confirmState.mode === 'replace' ? (
+                    <div className="space-y-2">
+                      <p className="text-sm text-red-700">
+                        <strong>replace 模式</strong>：将清空 MinIO 原始桶与解析桶中的所有对象，再写入备份包内容。
+                        <br />
+                        <span className="font-semibold">MinIO 文件删除不可回滚</span>；db-server 会自动创建 .bak 备份可回滚数据库。
+                      </p>
+                      <p className="text-sm text-red-700">请在下方输入 <strong>REPLACE</strong> 以确认此危险操作：</p>
+                      <input
+                        type="text"
+                        value={confirmInput}
+                        onChange={(e) => setConfirmInput(e.target.value)}
+                        placeholder="输入 REPLACE"
+                        className="w-full px-3 py-2 text-sm border border-red-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-300 bg-white"
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-sm text-red-700">
+                      merge 模式：仅补充数据库与 MinIO 中缺失的对象，不覆盖已有数据。
+                    </p>
+                  )}
                   <p className="text-xs text-red-600">待导入文件：{confirmState.fileName}</p>
                 </div>
               </div>
               <div className="flex items-center gap-3">
                 <button
                   onClick={handleConfirmImport}
-                  className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700"
+                  disabled={
+                    confirmState.kind === 'full' && confirmState.mode === 'replace'
+                      ? confirmInput !== 'REPLACE'
+                      : false
+                  }
+                  className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   <Upload size={14} /> 确认导入
                 </button>
                 <button
-                  onClick={() => setConfirmState(null)}
+                  onClick={() => { setConfirmState(null); setConfirmInput(''); }}
                   className="px-4 py-2 text-sm border border-red-200 text-red-700 rounded-lg hover:bg-white"
                 >
                   取消
                 </button>
               </div>
+            </div>
+          )}
+
+          {importResult && (
+            <div className="rounded-xl border border-green-200 bg-green-50 p-5 space-y-4">
+              <div className="flex items-start gap-3">
+                <CheckCircle size={18} className="mt-0.5 text-green-600" />
+                <div className="space-y-1">
+                  <p className="font-semibold text-green-700">恢复完成</p>
+                  <p className="text-xs text-green-600">
+                    模式：{importResult.mode === 'json' ? 'JSON 元数据' : importResult.mode}
+                  </p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+                {importResult.materialsCount !== undefined && (
+                  <div className="rounded-lg bg-white border border-green-100 px-4 py-3">
+                    <p className="text-xs text-gray-500">资料记录数</p>
+                    <p className="text-lg font-semibold text-gray-900">{importResult.materialsCount}</p>
+                  </div>
+                )}
+                {importResult.importedObjects !== undefined && (
+                  <div className="rounded-lg bg-white border border-green-100 px-4 py-3">
+                    <p className="text-xs text-gray-500">已导入对象</p>
+                    <p className="text-lg font-semibold text-gray-900">{importResult.importedObjects}</p>
+                  </div>
+                )}
+                {importResult.removedExistingObjects !== undefined && (
+                  <div className="rounded-lg bg-white border border-green-100 px-4 py-3">
+                    <p className="text-xs text-gray-500">已清除旧对象</p>
+                    <p className="text-lg font-semibold text-gray-900">{importResult.removedExistingObjects}</p>
+                  </div>
+                )}
+                {importResult.skippedObjects !== undefined && (
+                  <div className="rounded-lg bg-white border border-green-100 px-4 py-3">
+                    <p className="text-xs text-gray-500">跳过（已存在）</p>
+                    <p className="text-lg font-semibold text-gray-900">{importResult.skippedObjects}</p>
+                  </div>
+                )}
+                {importResult.backupPath && (
+                  <div className="rounded-lg bg-white border border-green-100 px-4 py-3 col-span-2 sm:col-span-3">
+                    <p className="text-xs text-gray-500">.bak 备份路径</p>
+                    <p className="text-xs font-mono text-gray-700 break-all">{importResult.backupPath}</p>
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={() => { setImportResult(null); clearLocalStateAndReload(); }}
+                className="flex items-center gap-2 px-4 py-2 text-sm bg-green-600 text-white rounded-lg hover:bg-green-700"
+              >
+                完成并刷新页面
+              </button>
             </div>
           )}
         </div>

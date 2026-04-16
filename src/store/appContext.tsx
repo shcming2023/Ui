@@ -422,18 +422,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const deletedIds = [...prevMaterialIds.current].filter((id) => !currentIds.has(id));
       if (deletedIds.length > 0) {
         dbDelete('/materials', { ids: deletedIds });
-        // fire-and-forget：清理 MinIO 存储（非关键路径，失败不阻塞 UI）
+        // 强一致性清理：等待 MinIO 清理结果，失败时以 toast.warning 通知用户
         // 从 prevMaterialsRef 取被删 material 的完整 metadata，
         // 让 upload-server 按 metadata.provider 决定是否清理，而非依赖当前运行时配置
         const deletedMaterials = prevMaterialsRef.current
           .filter((m) => deletedIds.includes(m.id))
           .map((m) => ({ id: m.id, metadata: m.metadata }));
-        fetch('/__proxy/upload/delete-material', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ materialIds: deletedIds, materials: deletedMaterials }),
-          signal: AbortSignal.timeout(30_000),
-        }).catch((e) => console.warn('[appContext] MinIO cleanup failed:', e.message));
+        void (async () => {
+          try {
+            const resp = await fetch('/__proxy/upload/delete-material', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ materialIds: deletedIds, materials: deletedMaterials }),
+              signal: AbortSignal.timeout(30_000),
+            });
+            if (!resp.ok) {
+              const errData = await resp.json().catch(() => null);
+              throw new Error(errData?.error || `HTTP ${resp.status}`);
+            }
+            const result = await resp.json().catch(() => null);
+            // 检查是否有部分清理失败的条目
+            if (Array.isArray(result?.errors) && result.errors.length > 0) {
+              console.warn('[appContext] MinIO partial cleanup failed:', result.errors);
+              toast.warning('部分 MinIO 文件清理失败，建议前往"备份与监控"扫描孤儿对象', { duration: 6000 });
+            }
+          } catch (e) {
+            console.warn('[appContext] MinIO cleanup failed:', e instanceof Error ? e.message : String(e));
+            toast.warning('MinIO 文件清理失败，数据库记录已删除，建议前往"备份与监控"扫描孤儿对象', { duration: 6000 });
+          }
+        })();
       }
       // 差量 upsert：仅对内容指纹变化的记录执行 POST（#7）
       for (const m of state.materials) {

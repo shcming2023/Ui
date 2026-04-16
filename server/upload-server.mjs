@@ -267,8 +267,58 @@ const MINIO_PUBLIC_ENDPOINT = (process.env.MINIO_PUBLIC_ENDPOINT || '').replace(
  */
 function rewritePresignedUrl(url) {
   if (!MINIO_PUBLIC_ENDPOINT || !url) return url;
-  // 匹配 http(s)://hostname:port 或 http(s)://hostname（不含端口）
   return url.replace(/^https?:\/\/[^/?#]+/, MINIO_PUBLIC_ENDPOINT);
+}
+
+function inferContentTypeByExt(fileName) {
+  const ext = String(fileName || '').split('.').pop()?.toLowerCase() || '';
+  if (ext === 'pdf') return 'application/pdf';
+  if (ext === 'md' || ext === 'markdown') return 'text/markdown; charset=utf-8';
+  if (ext === 'txt') return 'text/plain; charset=utf-8';
+  if (ext === 'json') return 'application/json; charset=utf-8';
+  if (ext === 'png') return 'image/png';
+  if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg';
+  if (ext === 'gif') return 'image/gif';
+  if (ext === 'webp') return 'image/webp';
+  if (ext === 'svg') return 'image/svg+xml';
+  return '';
+}
+
+function isGenericContentType(type) {
+  const t = String(type || '').trim().toLowerCase();
+  if (!t) return true;
+  return t.includes('octet-stream');
+}
+
+function encodeRFC5987ValueChars(str) {
+  return encodeURIComponent(str)
+    .replace(/['()]/g, (c) => `%${c.charCodeAt(0).toString(16).toUpperCase()}`)
+    .replace(/\*/g, '%2A')
+    .replace(/%(7C|60|5E)/g, (m) => m.toLowerCase());
+}
+
+function buildContentDisposition(disposition, fileName) {
+  const raw = String(fileName || 'file');
+  const fallback = raw
+    .replace(/[\r\n]/g, ' ')
+    .replace(/["\\]/g, '_')
+    .replace(/[^\x20-\x7E]/g, '_');
+  const encoded = encodeRFC5987ValueChars(raw);
+  return `${disposition}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+function resolveBucketForObject(objectName, bucketParam) {
+  const rawBucket = getMinioBucket();
+  const parsedBucket = getParsedBucket();
+
+  if (bucketParam && typeof bucketParam === 'string') {
+    if (bucketParam === 'raw') return rawBucket;
+    if (bucketParam === 'parsed') return parsedBucket;
+    if (bucketParam === rawBucket || bucketParam === parsedBucket) return bucketParam;
+  }
+
+  if (String(objectName || '').startsWith('parsed/')) return parsedBucket;
+  return rawBucket;
 }
 
 // ─── MinIO 动态配置（可在运行时通过 /settings/storage 接口更新）─
@@ -883,18 +933,32 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 // ─── 接口：GET /presign ────────────────────────────────────────
-// 为已有 objectName 重新生成 presigned URL（避免前端拿到的 URL 过期）
-// Query: ?objectName=originals/xxx.pdf
 app.get('/presign', async (req, res) => {
-  const { objectName } = req.query;
+  const { objectName, bucket: bucketParam } = req.query;
   if (!objectName || typeof objectName !== 'string') {
     res.status(400).json({ error: '缺少 objectName 参数' });
     return;
   }
 
+  const bucket = resolveBucketForObject(objectName, bucketParam);
+  const proxyUrl = `/__proxy/upload/proxy-file?objectName=${encodeURIComponent(objectName)}&bucket=${encodeURIComponent(bucket)}`;
+
   try {
-    const url = rewritePresignedUrl(await getMinioClient().presignedGetObject(getMinioBucket(), objectName, getPresignedExpiry()));
-    res.json({ url, objectName, expiresIn: getPresignedExpiry() });
+    let presignedUrl = '';
+    try {
+      presignedUrl = rewritePresignedUrl(await getMinioClient().presignedGetObject(bucket, objectName, getPresignedExpiry()));
+    } catch {
+      presignedUrl = '';
+    }
+
+    res.json({
+      url: proxyUrl,
+      proxyUrl,
+      presignedUrl: presignedUrl || undefined,
+      objectName,
+      bucket,
+      expiresIn: getPresignedExpiry(),
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.error('[upload-server] /presign failed:', message);
@@ -1220,6 +1284,31 @@ app.post('/backup/full-import', backupUpload.single('file'), async (req, res) =>
     }
 
     const dbData = JSON.parse(await zip.file(dbEntryPath).async('string'));
+
+    // ── 前置校验：manifest 完整性 ──────────────────────────────
+    if (typeof manifest.version !== 'string' || !manifest.version) {
+      res.status(400).json({ error: '备份包 manifest.json 缺少 version 字段' });
+      return;
+    }
+    if (typeof manifest.materialsCount !== 'number' || manifest.materialsCount < 0) {
+      res.status(400).json({ error: '备份包 manifest.json 的 materialsCount 字段无效' });
+      return;
+    }
+    if (typeof manifest.dbFile !== 'string' || !manifest.dbFile) {
+      res.status(400).json({ error: '备份包 manifest.json 缺少 dbFile 字段' });
+      return;
+    }
+
+    // ── 前置校验：db 数据结构合法性 ───────────────────────────
+    if (!dbData || typeof dbData !== 'object' || Array.isArray(dbData)) {
+      res.status(400).json({ error: '备份包 db-data.json 不是合法的 JSON 对象' });
+      return;
+    }
+    if (!('materials' in dbData) || typeof dbData.materials !== 'object' || Array.isArray(dbData.materials)) {
+      res.status(400).json({ error: '备份包 db-data.json 缺少合法的 materials 字段' });
+      return;
+    }
+
     const rawBucket = getMinioBucket();
     const parsedBucket = getParsedBucket();
     await Promise.all([ensureBucket(getMinioClient(), rawBucket), ensureBucket(getMinioClient(), parsedBucket)]);
@@ -1891,13 +1980,13 @@ app.get('/proxy-file', async (req, res) => {
     return;
   }
 
-  const bucket = (bucketParam && typeof bucketParam === 'string') ? bucketParam : getMinioBucket();
+  const bucket = resolveBucketForObject(objectName, bucketParam);
 
   try {
     console.log(`[upload-server] proxy-file: ${bucket}/${objectName}`);
     const client = getMinioClient();
 
-    // 获取对象 stat 以设置 Content-Type 和 Content-Length
+    // 获取对象 stat 以设置 Content-Type / Content-Length，并用于 Range 支持
     let stat;
     try {
       stat = await client.statObject(bucket, objectName);
@@ -1905,10 +1994,65 @@ app.get('/proxy-file', async (req, res) => {
       stat = null;
     }
 
-    const contentType = stat?.metaData?.['content-type'] || 'application/octet-stream';
+    const fileName = objectName.split('/').pop() || 'file';
+    const ext = fileName.split('.').pop()?.toLowerCase() || '';
+    const meta = stat?.metaData || {};
+    const metaContentType = meta['content-type'] || meta['Content-Type'] || meta['Content-type'] || '';
+    const inferredContentType = inferContentTypeByExt(fileName);
+    const contentType = inferredContentType && isGenericContentType(metaContentType)
+      ? inferredContentType
+      : (metaContentType || inferredContentType || 'application/octet-stream');
     res.setHeader('Content-Type', contentType);
-    if (stat?.size) res.setHeader('Content-Length', String(stat.size));
     res.setHeader('Cache-Control', 'private, max-age=300');
+
+    const inlineTypes = new Set(['pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'txt', 'md', 'json']);
+    const disposition = inlineTypes.has(ext) ? 'inline' : 'attachment';
+    res.setHeader('Content-Disposition', buildContentDisposition(disposition, fileName));
+
+    const size = typeof stat?.size === 'number' ? stat.size : null;
+    if (size != null) res.setHeader('Accept-Ranges', 'bytes');
+
+    const rangeHeader = req.headers.range;
+    const range = typeof rangeHeader === 'string' ? rangeHeader : '';
+
+    if (size != null && range.startsWith('bytes=')) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match) {
+        res.status(416);
+        res.setHeader('Content-Range', `bytes */${size}`);
+        res.end();
+        return;
+      }
+
+      const startRaw = match[1];
+      const endRaw = match[2];
+      const start = startRaw === '' ? 0 : Number(startRaw);
+      const end = endRaw === '' ? (size - 1) : Number(endRaw);
+
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end < start || start >= size) {
+        res.status(416);
+        res.setHeader('Content-Range', `bytes */${size}`);
+        res.end();
+        return;
+      }
+
+      const clampedEnd = Math.min(end, size - 1);
+      const length = clampedEnd - start + 1;
+
+      res.status(206);
+      res.setHeader('Content-Range', `bytes ${start}-${clampedEnd}/${size}`);
+      res.setHeader('Content-Length', String(length));
+
+      const stream = await client.getPartialObject(bucket, objectName, start, length);
+      stream.on('error', (err) => {
+        console.error('[upload-server] proxy-file stream error:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+      });
+      stream.pipe(res);
+      return;
+    }
+
+    if (size != null) res.setHeader('Content-Length', String(size));
 
     const stream = await client.getObject(bucket, objectName);
     stream.on('error', (err) => {
@@ -2139,6 +2283,146 @@ app.get('/storage-stats', async (_req, res) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+// ─── 审计：孤儿对象检测与清理 ─────────────────────────────────
+
+/**
+ * 从 MinIO 对象路径中提取 materialId（数值）
+ * 路径格式：originals/{materialId}/... 或 parsed/{materialId}/...
+ * 返回 null 表示路径不符合预期格式
+ */
+function extractMaterialIdFromPath(objectName) {
+  const parts = objectName.split('/');
+  // parts[0] = 'originals' | 'parsed', parts[1] = materialId（数字字符串）
+  if (parts.length < 2) return null;
+  const id = Number(parts[1]);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+/**
+ * GET /audit/orphans
+ * 扫描 MinIO 中路径前缀为 originals/ 或 parsed/ 的对象，
+ * 对比 db-server 中的全量 materials，返回无对应 DB 记录的孤儿对象列表。
+ */
+app.get('/audit/orphans', async (_req, res) => {
+  if (getStorageBackend() !== 'minio') {
+    res.json({ ok: true, orphans: [], totalCount: 0, totalSize: 0, note: 'non-minio backend' });
+    return;
+  }
+
+  try {
+    // 1. 获取 DB 中全量 materials 的 ID 集合
+    const dbResp = await fetch(`${DB_BASE_URL}/materials`, { signal: AbortSignal.timeout(5000) });
+    if (!dbResp.ok) throw new Error(`db-server /materials 返回 ${dbResp.status}`);
+    const dbMaterials = await dbResp.json(); // 数组
+    const knownIds = new Set(
+      (Array.isArray(dbMaterials) ? dbMaterials : [])
+        .map((m) => Number(m?.id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    );
+
+    // 2. 扫描 MinIO 两个桶
+    const rawBucket = getMinioBucket();
+    const parsedBucket = getParsedBucket();
+    const [rawObjects, parsedObjects] = await Promise.all([
+      listAllObjects(rawBucket, 'originals/'),
+      listAllObjects(parsedBucket, 'parsed/'),
+    ]);
+
+    // 3. 筛选孤儿：路径中的 materialId 不在 DB 中，或路径格式不合法
+    const orphans = [];
+    for (const obj of rawObjects) {
+      const id = extractMaterialIdFromPath(obj.name);
+      if (id === null || !knownIds.has(id)) {
+        orphans.push({ bucket: rawBucket, objectName: obj.name, size: obj.size || 0 });
+      }
+    }
+    for (const obj of parsedObjects) {
+      const id = extractMaterialIdFromPath(obj.name);
+      if (id === null || !knownIds.has(id)) {
+        orphans.push({ bucket: parsedBucket, objectName: obj.name, size: obj.size || 0 });
+      }
+    }
+
+    const totalSize = orphans.reduce((sum, o) => sum + o.size, 0);
+    res.json({ ok: true, orphans, totalCount: orphans.length, totalSize });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[upload-server] /audit/orphans failed:', message);
+    res.status(500).json({ ok: false, error: message });
+  }
+});
+
+/**
+ * POST /audit/cleanup-orphans
+ * 重新扫描孤儿对象（不依赖前端传入列表），批量删除后返回清理结果。
+ * 安全起见：后端独立重新扫描，不依赖前端提交的 objectNames 列表。
+ */
+app.post('/audit/cleanup-orphans', async (_req, res) => {
+  if (getStorageBackend() !== 'minio') {
+    res.status(400).json({ error: '孤儿对象清理仅支持 MinIO 存储后端' });
+    return;
+  }
+
+  try {
+    // 重新扫描（与 GET /audit/orphans 逻辑相同，保证安全性）
+    const dbResp = await fetch(`${DB_BASE_URL}/materials`, { signal: AbortSignal.timeout(5000) });
+    if (!dbResp.ok) throw new Error(`db-server /materials 返回 ${dbResp.status}`);
+    const dbMaterials = await dbResp.json();
+    const knownIds = new Set(
+      (Array.isArray(dbMaterials) ? dbMaterials : [])
+        .map((m) => Number(m?.id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    );
+
+    const rawBucket = getMinioBucket();
+    const parsedBucket = getParsedBucket();
+    const [rawObjects, parsedObjects] = await Promise.all([
+      listAllObjects(rawBucket, 'originals/'),
+      listAllObjects(parsedBucket, 'parsed/'),
+    ]);
+
+    const orphans = [];
+    for (const obj of rawObjects) {
+      const id = extractMaterialIdFromPath(obj.name);
+      if (id === null || !knownIds.has(id)) {
+        orphans.push({ bucket: rawBucket, objectName: obj.name, size: obj.size || 0 });
+      }
+    }
+    for (const obj of parsedObjects) {
+      const id = extractMaterialIdFromPath(obj.name);
+      if (id === null || !knownIds.has(id)) {
+        orphans.push({ bucket: parsedBucket, objectName: obj.name, size: obj.size || 0 });
+      }
+    }
+
+    if (orphans.length === 0) {
+      res.json({ ok: true, removed: 0, errors: [], totalSize: 0, note: '无孤儿对象' });
+      return;
+    }
+
+    // 批量删除
+    let removed = 0;
+    let totalSize = 0;
+    const errors = [];
+    for (const orphan of orphans) {
+      try {
+        await getMinioClient().removeObject(orphan.bucket, orphan.objectName);
+        removed += 1;
+        totalSize += orphan.size;
+      } catch (err) {
+        errors.push({ objectName: orphan.objectName, error: err.message });
+      }
+    }
+
+    console.log(`[upload-server] /audit/cleanup-orphans: removed=${removed} errors=${errors.length}`);
+    res.json({ ok: true, removed, errors, totalSize });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[upload-server] /audit/cleanup-orphans failed:', message);
     res.status(500).json({ ok: false, error: message });
   }
 });
