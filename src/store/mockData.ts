@@ -79,7 +79,7 @@ export const initialAiProviders: AiProvider[] = [
     enabled: true,
     apiEndpoint: 'http://host.docker.internal:11434/v1/chat/completions',
     apiKey: '',
-    model: 'qwen3.5:27b',
+    model: 'qwen2.5:14b',
     timeout: 600,
     priority: 1,
   },
@@ -120,10 +120,10 @@ export const initialAiConfig: AiConfig = {
   providers: initialAiProviders,
   apiEndpoint: 'http://host.docker.internal:11434/v1/chat/completions',
   apiKey: '',
-  model: 'qwen3.5:27b',
+  model: 'qwen2.5:14b',
   timeout: 600,
   maxFileSize: 50 * 1024 * 1024, // AI 分析最大 50MB
-  maxMarkdownChars: 200000,
+  maxMarkdownChars: 100000, // 14B 模型建议 100k 以内，降低内存占用
   enabledFileTypes: ['.pdf', '.docx', '.doc', '.txt', '.md'],
   prompts: {
     title: '根据以下教育资料的内容，生成一个简洁准确的中文资料名称。要求：包含学科、年级、内容类型等关键信息，长度不超过30字。',
@@ -175,5 +175,5 @@ export const initialMinioConfig: MinioConfig = {
   secretKey: 'minioadmin',
   bucket: 'eduassets',
   parsedBucket: 'eduassets-parsed',
-  presignedExpiry: 3600,
+  presignedExpiry: 86400, // 24 小时有效期，适配长时间批处理场景
 };

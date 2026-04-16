@@ -274,6 +274,7 @@ const initialState: AppState = {
   tasks:            loadFromStorage(LS.TASKS, initialTasks),
   products:         loadFromStorage(LS.PRODUCTS, initialProducts),
   batchProcessing:  loadFromStorage(LS.BATCH_PROCESSING, initialBatchProcessing),
+  serverBatchQueue:  null,
   flexibleTags:     loadFromStorage(LS.FLEXIBLE_TAGS, initialFlexibleTags),
   aiRules:          loadFromStorage(LS.AI_RULES, initialAiRules),
   aiRuleSettings:   loadFromStorage(LS.AI_RULE_SETTINGS, initialAiRuleSettings),
@@ -627,6 +628,45 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (!hydratedRef.current) return;
     dbPut('/settings/batchProcessing', state.batchProcessing);
   }, [state.batchProcessing]);
+
+  // ── 后端批处理队列状态轮询 ──────────────────────────
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    let active = true;
+    let idleCounter = 0;
+    const poll = async () => {
+      try {
+        const res = await fetch('/__proxy/upload/batch/status', {
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok && active) {
+          const data = await res.json();
+          dispatch({ type: 'SERVER_BATCH_SYNC', payload: data });
+        }
+      } catch {
+        // 轮询失败静默忽略
+      }
+    };
+    // 立即轮询一次
+    poll();
+    // 根据队列是否活跃调整轮询频率：活跃时 3s，空闲时 15s
+    const interval = setInterval(() => {
+      const q = state.serverBatchQueue;
+      const isActive = q && (q.running || (q.pending ?? 0) > 0 || (q.processing ?? 0) > 0);
+      if (isActive) {
+        idleCounter = 0;
+        poll();
+      } else {
+        // 空闲时每 5 次轮询一次（15s 周期）
+        idleCounter++;
+        if (idleCounter >= 5) {
+          idleCounter = 0;
+          poll();
+        }
+      }
+    }, 3000);
+    return () => { active = false; clearInterval(interval); };
+  }, [state.serverBatchQueue?.running, state.serverBatchQueue?.total]);
 
   return (
     <AppContext.Provider value={{ state, dispatch, dbReady }}>

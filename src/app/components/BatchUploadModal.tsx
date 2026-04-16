@@ -16,7 +16,7 @@ import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import { runMinerUPipeline } from '../../utils/mineruApi';
 import { checkLocalMinerUHealth } from '../../utils/mineruLocalApi';
-import type { BatchQueueItem } from '../../store/types';
+import type { BatchQueueItem, ServerBatchQueueState } from '../../store/types';
 
 const runtimeFileMap: Map<string, File> =
   (globalThis as { __luceonBatchFileMap?: Map<string, File> }).__luceonBatchFileMap ||
@@ -585,10 +585,172 @@ export function BatchProcessingController() {
   return null;
 }
 
+// ─── 后端批处理队列控制面板 ────────────────────────────────────
+
+function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
+  const handleStart = async () => {
+    try {
+      await fetch('/__proxy/upload/batch/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoMinerU: queue.autoMinerU, autoAI: queue.autoAI }),
+      });
+      toast.success('后端队列已启动');
+    } catch (e) {
+      toast.error(`启动失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handlePause = async () => {
+    try {
+      await fetch('/__proxy/upload/batch/pause', { method: 'POST' });
+      toast.info('后端队列已暂停');
+    } catch (e) {
+      toast.error(`暂停失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleResume = async () => {
+    try {
+      await fetch('/__proxy/upload/batch/resume', { method: 'POST' });
+      toast.success('后端队列已恢复');
+    } catch (e) {
+      toast.error(`恢复失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleStop = async () => {
+    try {
+      await fetch('/__proxy/upload/batch/stop', { method: 'POST' });
+      toast.info('后端队列已停止');
+    } catch (e) {
+      toast.error(`停止失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleRetryFailed = async () => {
+    try {
+      const res = await fetch('/__proxy/upload/batch/retry-failed', { method: 'POST' });
+      const data = await res.json();
+      toast.success(`已重试 ${data.retried || 0} 个失败任务`);
+    } catch (e) {
+      toast.error(`重试失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleClearCompleted = async () => {
+    try {
+      const res = await fetch('/__proxy/upload/batch/clear-completed', { method: 'POST' });
+      const data = await res.json();
+      toast.success(`已清理 ${data.removed || 0} 个已完成任务`);
+    } catch (e) {
+      toast.error(`清理失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const isRunning = queue.running && !queue.paused;
+  const isPaused = queue.running && queue.paused;
+
+  return (
+    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h4 className="text-sm font-semibold text-blue-900">
+            后端处理队列
+            <span className={`ml-2 inline-block w-2 h-2 rounded-full ${
+              isRunning ? 'bg-green-500 animate-pulse' : isPaused ? 'bg-yellow-500' : queue.total > 0 ? 'bg-gray-400' : 'bg-gray-300'
+            }`} />
+          </h4>
+          <p className="text-xs text-blue-700 mt-0.5">
+            总计 {queue.total} · 待处理 {queue.pending} · 处理中 {queue.processing} · 完成 {queue.completed} · 失败 {queue.errors}
+            {queue.memory && (
+              <span className={`ml-2 ${queue.memory.pressure ? 'text-red-600 font-semibold' : ''}`}>
+                · 内存 {queue.memory.freeMB}MB 空闲{queue.memory.pressure ? ' (压力过大，已暂停)' : ''}
+              </span>
+            )}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {!queue.running ? (
+            <button onClick={handleStart} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">
+              <Play size={14} /> 启动
+            </button>
+          ) : isPaused ? (
+            <button onClick={handleResume} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700">
+              <Play size={14} /> 恢复
+            </button>
+          ) : (
+            <button onClick={handlePause} className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-500 text-white text-sm rounded-lg hover:bg-yellow-600">
+              <Pause size={14} /> 暂停
+            </button>
+          )}
+          {queue.running && (
+            <button onClick={handleStop} className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
+              停止
+            </button>
+          )}
+          {queue.errors > 0 && (
+            <button onClick={handleRetryFailed} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
+              <RotateCcw size={14} /> 重试失败
+            </button>
+          )}
+          {queue.completed > 0 && (
+            <button onClick={handleClearCompleted} className="px-3 py-1.5 text-sm text-gray-600 border border-gray-200 rounded-lg hover:bg-gray-50">
+              清理已完成
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 后端队列任务列表 */}
+      {queue.items.length > 0 && (
+        <div className="max-h-60 overflow-y-auto space-y-2">
+          {queue.items.map((job) => (
+            <div key={job.id} className="bg-white rounded-lg border border-blue-100 p-2.5 flex flex-col gap-1.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 overflow-hidden">
+                  <FileIcon size={16} className="text-blue-400 flex-shrink-0" />
+                  <span className="text-sm text-gray-900 truncate" title={job.path}>{job.path || job.fileName}</span>
+                  <span className="text-xs text-gray-400">{formatBytes(job.fileSize)}</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  {job.retries > 0 && (
+                    <span className="text-xs text-orange-500">重试 {job.retries}/{job.maxRetries}</span>
+                  )}
+                  {job.status === 'completed' ? (
+                    <span className="flex items-center gap-1 text-xs text-green-600"><CheckCircle2 size={12} /> 完成</span>
+                  ) : job.status === 'error' ? (
+                    <span className="flex items-center gap-1 text-xs text-red-600"><AlertCircle size={12} /> 失败</span>
+                  ) : job.status === 'pending' ? (
+                    <span className="text-xs text-gray-500">等待中</span>
+                  ) : (
+                    <span className="flex items-center gap-1 text-xs text-blue-600"><Loader size={12} className="animate-spin" /> {job.progress}%</span>
+                  )}
+                </div>
+              </div>
+              {job.message && (
+                <p className={`text-xs truncate ${job.status === 'error' ? 'text-red-500' : 'text-gray-500'}`} title={job.message}>
+                  {job.message}
+                </p>
+              )}
+              {job.status !== 'completed' && job.status !== 'error' && job.status !== 'pending' && (
+                <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden">
+                  <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} />
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function BatchUploadModal() {
   const { state, dispatch } = useAppStore();
   const bp = state.batchProcessing;
   const items = bp.items;
+  const serverQueue = state.serverBatchQueue;
 
   const isProcessing = bp.running && !bp.paused;
   const [diagRunning, setDiagRunning] = useState(false);
@@ -754,7 +916,11 @@ export function BatchUploadModal() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50">
-          {items.length === 0 ? (
+          {/* 后端批处理队列控制面板 */}
+          {serverQueue && serverQueue.total > 0 && (
+            <ServerBatchQueuePanel queue={serverQueue} />
+          )}
+          {items.length === 0 && (!serverQueue || serverQueue.total === 0) ? (
             <div className="flex flex-col items-center justify-center h-full text-gray-400 space-y-3 py-12">
               <Folder size={48} className="text-gray-300" />
               <p>暂无文件，请先在「原始资料」中选择文件或文件夹</p>
@@ -861,7 +1027,9 @@ export function BatchUploadModal() {
 export function BatchProgressFab() {
   const { state, dispatch } = useAppStore();
   const bp = state.batchProcessing;
+  const sq = state.serverBatchQueue;
 
+  // 前端队列统计
   const activeCount = bp.items.filter((i) => !['completed', 'skipped', 'error'].includes(i.status)).length;
   const errorCount = bp.items.filter((i) => i.status === 'error').length;
   const totalCount = bp.items.length;
@@ -877,13 +1045,48 @@ export function BatchProgressFab() {
       )
     : false;
 
-  if (totalCount === 0) return null;
+  // 后端队列统计
+  const sqTotal = sq?.total ?? 0;
+  const sqPending = sq?.pending ?? 0;
+  const sqProcessing = sq?.processing ?? 0;
+  const sqErrors = sq?.errors ?? 0;
+  const sqRunning = sq?.running && !sq?.paused;
 
-  const label = bp.running
-    ? `处理中 ${activeCount}/${totalCount}`
-    : bp.paused
-      ? `已暂停 ${activeCount}/${totalCount}`
-      : `队列 ${activeCount}/${totalCount}`;
+  // 无任何队列时隐藏
+  if (totalCount === 0 && sqTotal === 0) return null;
+
+  // 优先显示后端队列状态
+  let label: string;
+  let dotColor: string;
+  let totalErrors = errorCount + sqErrors;
+
+  if (sqTotal > 0) {
+    label = sqRunning
+      ? `后端处理中 ${sqPending + sqProcessing}/${sqTotal}`
+      : sq?.paused
+        ? `后端已暂停 ${sqPending + sqProcessing}/${sqTotal}`
+        : `后端队列 ${sqPending + sqProcessing}/${sqTotal}`;
+    dotColor = sq?.memory?.pressure
+      ? 'bg-red-500'
+      : sqRunning
+        ? 'bg-green-500 animate-pulse'
+        : sq?.paused
+          ? 'bg-yellow-500'
+          : 'bg-gray-400';
+  } else {
+    label = bp.running
+      ? `处理中 ${activeCount}/${totalCount}`
+      : bp.paused
+        ? `已暂停 ${activeCount}/${totalCount}`
+        : `队列 ${activeCount}/${totalCount}`;
+    dotColor = isStale
+      ? 'bg-red-500'
+      : bp.running && !bp.paused
+        ? 'bg-blue-600'
+        : bp.paused
+          ? 'bg-yellow-500'
+          : 'bg-gray-400';
+  }
 
   return (
     <button
@@ -891,21 +1094,11 @@ export function BatchProgressFab() {
       className="fixed right-5 bottom-5 z-40 flex items-center gap-2 px-4 py-2 rounded-full shadow-lg border border-gray-200 bg-white hover:bg-gray-50 text-sm text-gray-800"
       title="打开批处理进度"
     >
-      <span
-        className={`inline-block w-2 h-2 rounded-full ${
-          isStale
-            ? 'bg-red-500'
-            : bp.running && !bp.paused
-              ? 'bg-blue-600'
-              : bp.paused
-                ? 'bg-yellow-500'
-                : 'bg-gray-400'
-        }`}
-      />
+      <span className={`inline-block w-2 h-2 rounded-full ${dotColor}`} />
       <span className="font-medium">{label}</span>
-      {errorCount > 0 && (
+      {totalErrors > 0 && (
         <span className="ml-1 px-2 py-0.5 rounded-full bg-red-50 text-red-600 text-xs">
-          {errorCount} 失败
+          {totalErrors} 失败
         </span>
       )}
     </button>

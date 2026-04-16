@@ -148,6 +148,15 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       };
     }
 
+    // ==================== 后端批处理队列状态同步 ====================
+
+    case 'SERVER_BATCH_SYNC': {
+      return {
+        ...state,
+        serverBatchQueue: action.payload,
+      };
+    }
+
     // ==================== 资料操作 ====================
 
     /**

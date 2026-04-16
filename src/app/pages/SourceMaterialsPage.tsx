@@ -183,7 +183,9 @@ export function SourceMaterialsPage() {
     return { label: '处理中', detail: msg };
   };
 
-  const handleBatchFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const [batchUploading, setBatchUploading] = useState(false);
+
+  const handleBatchFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     if (files.length === 0) return;
     const invalidFiles = files.filter((f) => !validateFile(f).valid);
@@ -191,22 +193,119 @@ export function SourceMaterialsPage() {
       toast.error(`发现 ${invalidFiles.length} 个不符合规范的文件被过滤`, { icon: <AlertTriangle size={16} /> });
     }
     const validFiles = files.filter((f) => validateFile(f).valid);
-    if (validFiles.length > 0) {
-      const registered = validFiles.map((file) => {
-        const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const path = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-        return { id, file, fileName: file.name, fileSize: file.size, path };
-      });
-      batchRegisterFiles(registered.map((it) => ({ id: it.id, file: it.file })));
-      dispatch({
-        type: 'BATCH_ADD_FILES',
-        payload: {
-          items: registered.map((it) => ({ id: it.id, fileName: it.fileName, fileSize: it.fileSize, path: it.path })),
-          openUi: true,
-        },
-      });
-    }
     e.target.value = '';
+    if (validFiles.length === 0) return;
+
+    // 后端队列模式：先上传文件到 MinIO，然后提交到后端队列
+    setBatchUploading(true);
+    toast.info(`正在上传 ${validFiles.length} 个文件到存储服务...`);
+
+    const serverJobs: Array<{
+      id: string; fileName: string; fileSize: number; path: string;
+      objectName: string; mimeType: string; materialId: number;
+    }> = [];
+
+    let idCounter = 0;
+    for (const file of validFiles) {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+      idCounter = (idCounter + 1) % 1000;
+      const materialId = Date.now() * 1000 + idCounter;
+
+      try {
+        // 上传文件到 MinIO
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('materialId', String(materialId));
+
+        const uploadRes = await fetch('/__proxy/upload/upload', {
+          method: 'POST',
+          body: formData,
+        });
+
+        if (!uploadRes.ok) {
+          const errText = await uploadRes.text();
+          toast.error(`上传失败: ${file.name} - ${errText}`);
+          continue;
+        }
+
+        const uploadResult = await uploadRes.json();
+
+        // 创建 material 记录
+        dispatch({
+          type: 'ADD_MATERIAL',
+          payload: {
+            id: materialId,
+            title: file.name.replace(/\.[^.]+$/, ''),
+            type: file.name.split('.').pop()?.toUpperCase() ?? 'FILE',
+            size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
+            sizeBytes: file.size,
+            uploadTime: '刚刚',
+            uploadTimestamp: Date.now(),
+            status: 'processing',
+            mineruStatus: 'pending',
+            aiStatus: 'pending',
+            tags: [],
+            metadata: {
+              relativePath: filePath,
+              fileUrl: uploadResult.url,
+              objectName: uploadResult.objectName || '',
+              fileName: uploadResult.fileName,
+              provider: uploadResult.provider,
+              mimeType: uploadResult.mimeType,
+              ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
+              ...(uploadResult.format ? { format: uploadResult.format } : {}),
+              processingStage: 'mineru',
+              processingMsg: '等待后端队列处理',
+              processingProgress: '0',
+              processingUpdatedAt: new Date().toISOString(),
+            },
+            uploader: '当前用户',
+          },
+        });
+
+        serverJobs.push({
+          id,
+          fileName: file.name,
+          fileSize: file.size,
+          path: filePath,
+          objectName: uploadResult.objectName || '',
+          mimeType: uploadResult.mimeType || 'application/pdf',
+          materialId,
+        });
+      } catch (err) {
+        toast.error(`上传异常: ${file.name} - ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    // 提交到后端队列
+    if (serverJobs.length > 0) {
+      try {
+        const addRes = await fetch('/__proxy/upload/batch/jobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ jobs: serverJobs }),
+        });
+        if (addRes.ok) {
+          toast.success(`已提交 ${serverJobs.length} 个文件到后端处理队列`);
+          // 同时添加到前端队列 UI 以便展示
+          dispatch({
+            type: 'BATCH_ADD_FILES',
+            payload: {
+              items: serverJobs.map((j) => ({ id: j.id, fileName: j.fileName, fileSize: j.fileSize, path: j.path })),
+              openUi: true,
+            },
+          });
+        } else {
+          const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
+          toast.error(`提交队列失败: ${(errData as { error?: string }).error || '未知错误'}`);
+        }
+      } catch (err) {
+        toast.error(`提交队列异常: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    setBatchUploading(false);
   };
 
   const handleResetConfig = () => {

@@ -41,6 +41,12 @@ import { PDFDocument } from 'pdf-lib';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import {
+  initBatchQueue, restoreBatchQueue, getQueueStatus,
+  addJobs, startQueue, pauseQueue, resumeQueue, stopQueue,
+  retryFailed, retryJob, removeJob, clearCompleted, clearAll,
+  shutdown as shutdownBatchQueue,
+} from './batch-queue.mjs';
 
 const app = express();
 const port = Number(process.env.UPLOAD_PORT || 8788);
@@ -382,6 +388,27 @@ function getFileBuffer(file) {
   // 异步删除临时文件，不阻塞请求
   fs.unlink(file.path, () => {});
   return buf;
+}
+
+/**
+ * 流式上传 multer 磁盘文件到 MinIO，避免将整个文件加载到内存。
+ * 用于大文件场景（如 > 50MB 的 PDF），上传完成后自动清理临时文件。
+ * @param {object} file - multer file 对象
+ * @param {string} bucket - MinIO bucket 名称
+ * @param {string} objectName - MinIO 对象路径
+ * @param {string} mimeType - MIME 类型
+ * @returns {Promise<void>}
+ */
+async function streamUploadToMinIO(file, bucket, objectName, mimeType) {
+  const client = getMinioClient();
+  await ensureBucket(client, bucket);
+  const fileStream = fs.createReadStream(file.path);
+  const fileSize = file.size || fs.statSync(file.path).size;
+  await client.putObject(bucket, objectName, fileStream, fileSize, {
+    'Content-Type': mimeType || 'application/octet-stream',
+  });
+  // 上传完成后清理临时文件
+  fs.unlink(file.path, () => {});
 }
 
 /** 安全清理 multer 临时文件（用于错误路径或提前返回场景） */
@@ -1377,7 +1404,7 @@ app.post('/backup/full-import', backupUpload.single('file'), async (req, res) =>
 app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
   const localEndpoint = normalizeEndpoint(req.body?.localEndpoint);
   const materialId = String(req.body?.materialId || '').trim();
-  const localTimeout = Number(req.body?.localTimeout || 300);
+  const localTimeout = Number(req.body?.localTimeout || 3600);
   const startedAt = Date.now();
   const wantsSse = String(req.headers?.accept || '').includes('text/event-stream');
 
@@ -1749,7 +1776,7 @@ async function analyzeWithFallback(providers, systemPrompt, userPrompt, opts = {
 }
 
 function buildMarkdownContext(markdownText, maxChars) {
-  const max = Number.isFinite(Number(maxChars)) ? Number(maxChars) : 200000;
+  const max = Number.isFinite(Number(maxChars)) ? Number(maxChars) : 100000;
   const limit = Math.max(10000, Math.min(200000, Math.floor(max)));
   const text = String(markdownText || '');
 
@@ -2611,6 +2638,74 @@ app.post('/delete-material', async (req, res) => {
   res.json({ ok: true, results, errors });
 });
 
+// ══════════════════════════════════════════════════════════════════
+// ─── 后端批处理队列 REST API ─────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+// GET /batch/status - 获取队列状态
+app.get('/batch/status', (_req, res) => {
+  res.json(getQueueStatus());
+});
+
+// POST /batch/jobs - 添加任务到队列
+// Body: { jobs: [{ id, fileName, fileSize, path, objectName, mimeType, materialId }] }
+app.post('/batch/jobs', (req, res) => {
+  const { jobs } = req.body;
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    res.status(400).json({ error: '缺少 jobs 数组' });
+    return;
+  }
+  const ids = addJobs(jobs);
+  res.json({ ok: true, added: ids.length, ids });
+});
+
+// POST /batch/start - 启动队列处理
+// Body: { autoMinerU?: boolean, autoAI?: boolean }
+app.post('/batch/start', (req, res) => {
+  const result = startQueue(req.body || {});
+  res.json(result);
+});
+
+// POST /batch/pause - 暂停队列
+app.post('/batch/pause', (_req, res) => {
+  res.json(pauseQueue());
+});
+
+// POST /batch/resume - 恢复队列
+app.post('/batch/resume', (_req, res) => {
+  res.json(resumeQueue());
+});
+
+// POST /batch/stop - 停止队列
+app.post('/batch/stop', (_req, res) => {
+  res.json(stopQueue());
+});
+
+// POST /batch/retry-failed - 重试所有失败任务
+app.post('/batch/retry-failed', (_req, res) => {
+  res.json(retryFailed());
+});
+
+// POST /batch/retry/:jobId - 重试指定任务
+app.post('/batch/retry/:jobId', (req, res) => {
+  res.json(retryJob(req.params.jobId));
+});
+
+// DELETE /batch/job/:jobId - 移除指定任务
+app.delete('/batch/job/:jobId', (req, res) => {
+  res.json(removeJob(req.params.jobId));
+});
+
+// POST /batch/clear-completed - 清空已完成和失败的任务
+app.post('/batch/clear-completed', (_req, res) => {
+  res.json(clearCompleted());
+});
+
+// POST /batch/clear-all - 清空全部任务（停止队列）
+app.post('/batch/clear-all', (_req, res) => {
+  res.json(clearAll());
+});
+
 app.use((err, req, res, _next) => {
   const requestId = req.requestId || '-';
   if (err instanceof multer.MulterError) {
@@ -2635,12 +2730,42 @@ const server = app.listen(port, async () => {
   if (getStorageBackend() === 'minio') {
     console.log(`[upload-server] MinIO: ${minioState.endpoint}:${minioState.port}`);
   }
+
+  // 初始化后端批处理队列引擎
+  initBatchQueue({
+    dbBaseUrl: DB_BASE_URL,
+    getMinioClient,
+    getMinioBucket,
+    getParsedBucket,
+    getPresignedExpiry,
+    ensureBucket,
+    rewritePresignedUrl,
+    getStorageBackend,
+    uploadBufferToMinIO,
+    extractLocalMarkdown,
+    buildMarkdownContext,
+    callGradioToMarkdown,
+    waitMinerUTask,
+    fetchMinerUResult,
+    analyzeWithFallback,
+    calcPages,
+    detectFormat,
+    normalizeFileName,
+    fixFilenameEncoding,
+    isEnabledFlag,
+    getFileBuffer,
+    cleanupTempFile,
+  });
+  await restoreBatchQueue();
+  console.log('[upload-server] Batch queue engine initialized');
 });
 
 // ─── 优雅停机 ─────────────────────────────────────────────────
 
-function gracefulShutdown(signal) {
+async function gracefulShutdown(signal) {
   console.log(`[upload-server] Received ${signal}, shutting down...`);
+  // 先持久化批处理队列状态
+  await shutdownBatchQueue().catch(e => console.warn('[upload-server] batch queue shutdown error:', e.message));
   server.close(() => {
     console.log(`[upload-server] Server closed after ${signal}.`);
     process.exit(0);
@@ -2656,9 +2781,9 @@ process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (err) => {
   console.error('[upload-server] Uncaught exception:', err);
-  process.exit(1);
+  // 不立即退出，保持服务稳定性，但记录异常
 });
 process.on('unhandledRejection', (reason) => {
   console.error('[upload-server] Unhandled rejection:', reason);
-  process.exit(1);
+  // 不立即退出，保持服务稳定性
 });

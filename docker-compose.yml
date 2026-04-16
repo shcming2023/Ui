@@ -52,9 +52,10 @@ services:
       retries: 3
       start_period: 15s
 
-  # ── 文件上传代理服务 ─────────────────────────────────────
+   # ── 文件上传代理服务 + 后端批处理队列引擎 ─────────────────
   # 接收前端上传的文件，优先转发到 MinIO（持久化存储），失败时降级到 tmpfiles.org（临时存储）
   # 供 MinerU URL 模式解析使用
+  # 同时包含后端批处理队列引擎，支持浏览器无关的不间断 PDF 处理
   upload-server:
     build:
       context: .
@@ -69,6 +70,16 @@ services:
         condition: service_healthy
     networks:
       - cms-network
+    # ── 内存限制：Mac Mini 32G 环境下给 upload-server 分配 2G
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+        reservations:
+          memory: 512M
+    # ── 允许访问宿主机的 MinerU 和 Ollama 服务
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       - UPLOAD_PORT=8788
       - STORAGE_BACKEND=${STORAGE_BACKEND:-minio}
@@ -78,14 +89,16 @@ services:
       - MINIO_ACCESS_KEY=${MINIO_ACCESS_KEY:-minioadmin}
       - MINIO_SECRET_KEY=${MINIO_SECRET_KEY:-minioadmin}
       - MINIO_BUCKET=${MINIO_BUCKET:-eduassets}
-      # Presigned URL 有效期（秒），默认 1 小时；生产环境建议适当延长
-      - MINIO_PRESIGNED_EXPIRY=${MINIO_PRESIGNED_EXPIRY:-3600}
+      # Presigned URL 有效期（秒），默认 24 小时，支持长时间批处理
+      - MINIO_PRESIGNED_EXPIRY=${MINIO_PRESIGNED_EXPIRY:-86400}
       # 局域网/生产部署：设置此变量让浏览器可访问 MinIO 文件
       # 格式：http://<宿主机IP>:<CMS_PORT>/minio
       - MINIO_PUBLIC_ENDPOINT=${MINIO_PUBLIC_ENDPOINT:-}
       # db-server 地址（Docker 网络内通过服务名访问）
       # ⚠️ 必须设置此变量，否则 upload-server 默认使用 localhost:8789 无法连通 db-server 容器
       - DB_BASE_URL=http://db-server:8789
+      # Node.js 内存限制：与 deploy.resources.limits.memory 匹配
+      - NODE_OPTIONS=--max-old-space-size=1536
       - TZ=Asia/Shanghai
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8788/health"]
@@ -107,9 +120,16 @@ services:
       - "8789"
     networks:
       - cms-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
     environment:
       - DB_PORT=8789
       - DB_PATH=/data/db-data.json
+      - NODE_OPTIONS=--max-old-space-size=384
       - TZ=Asia/Shanghai
     volumes:
       - cms-db-data:/data
@@ -128,6 +148,12 @@ services:
     image: minio/minio:latest
     container_name: cms-minio
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+        reservations:
+          memory: 256M
     # 生产/UAT 环境：9000 仅内部访问，通过 Nginx /minio/ 代理对外暴露
     # 如需直接访问 MinIO API，可临时取消注释下方端口映射
     # ports:

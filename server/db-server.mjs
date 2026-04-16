@@ -477,6 +477,7 @@ const ALLOWED_SETTINGS_KEYS = new Set([
   'initialized',
   'batchProcessing',
   'batchProcessingUpdatedAt',
+  'serverBatchQueue',
 ]);
 
 app.get('/settings', (_req, res) => {

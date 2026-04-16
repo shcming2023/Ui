@@ -15,7 +15,44 @@ export type AiStatus = 'analyzed' | 'analyzing' | 'pending' | 'failed';
 export type MinerUStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 /** 批处理队列条目状态 */
-export type BatchItemStatus = 'pending' | 'uploading' | 'mineru' | 'ai' | 'completed' | 'error' | 'skipped';
+export type BatchItemStatus = 'pending' | 'uploading' | 'uploaded' | 'mineru' | 'ai' | 'completed' | 'error' | 'skipped';
+
+/**
+ * 后端批处理队列任务（由 upload-server 管理，前端只读轮询）
+ */
+export interface ServerBatchJob {
+  id: string;
+  fileName: string;
+  fileSize: number;
+  path: string;
+  materialId: number;
+  status: BatchItemStatus;
+  progress: number;
+  message: string;
+  error: string;
+  retries: number;
+  maxRetries: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/**
+ * 后端批处理队列状态（从 /batch/status 轮询获取）
+ */
+export interface ServerBatchQueueState {
+  running: boolean;
+  paused: boolean;
+  autoMinerU: boolean;
+  autoAI: boolean;
+  total: number;
+  pending: number;
+  processing: number;
+  completed: number;
+  errors: number;
+  items: ServerBatchJob[];
+  memory: { usedRatio: number; freeMB: number; totalMB: number; pressure: boolean };
+  updatedAt: number;
+}
 
 /** 排序选项 */
 export type SortOption = 'newest' | 'oldest' | 'name' | 'size';
@@ -343,6 +380,7 @@ export interface AppState {
   tasks: Task[];
   products: Product[];
   batchProcessing: BatchProcessingState;
+  serverBatchQueue: ServerBatchQueueState | null; // 后端批处理队列状态（轮询获取）
   flexibleTags: FlexibleTag[];
   aiRules: AiRule[];
   aiRuleSettings: AiRuleSettings;
@@ -366,6 +404,8 @@ export type AppAction =
   | { type: 'BATCH_SET_PAUSED'; payload: { paused: boolean } }
   | { type: 'BATCH_SET_UI_OPEN'; payload: { uiOpen: boolean } }
   | { type: 'BATCH_SET_OPTIONS'; payload: Partial<Pick<BatchProcessingState, 'autoMinerU' | 'autoAI'>> }
+  // 后端批处理队列状态同步
+  | { type: 'SERVER_BATCH_SYNC'; payload: ServerBatchQueueState }
   // 资料操作
   | { type: 'ADD_MATERIAL'; payload: Material }
   | { type: 'DELETE_MATERIAL'; payload: number[] }
