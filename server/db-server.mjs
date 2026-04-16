@@ -474,6 +474,9 @@ app.delete('/ai-rules', (req, res) => {
 const ALLOWED_SETTINGS_KEYS = new Set([
   'aiConfig', 'aiRuleSettings', 'mineruConfig', 'minioConfig',
   'uiPreferences', 'systemConfig', 'backupConfig',
+  'initialized',
+  'batchProcessing',
+  'batchProcessingUpdatedAt',
 ]);
 
 app.get('/settings', (_req, res) => {

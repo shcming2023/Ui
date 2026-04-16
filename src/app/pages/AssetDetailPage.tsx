@@ -541,7 +541,7 @@ function PDFPreviewPanel({ objectName }: { objectName?: string }) {
     : null;
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 flex flex-col h-full">
+    <div className="bg-white rounded-xl border border-gray-200 p-5 flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold text-gray-800 flex items-center gap-2">
           <FileText size={15} className="text-red-500" /> PDF 预览
@@ -557,7 +557,7 @@ function PDFPreviewPanel({ objectName }: { objectName?: string }) {
           </a>
         )}
       </div>
-      <div className="flex-1 rounded-lg overflow-hidden border border-gray-100 bg-gray-50 min-h-[500px]">
+      <div className="w-full aspect-[210/297] rounded-lg overflow-hidden border border-gray-100 bg-gray-50">
         {loading && !failed && (
           <div className="flex items-center justify-center h-full text-gray-400 text-xs gap-2">
             <Loader size={14} className="animate-spin" /> 加载中...
@@ -592,21 +592,32 @@ function PDFPreviewPanel({ objectName }: { objectName?: string }) {
 }
 
 // ─── Markdown 渲染预览面板 ──────────────────────────────────────
-function MarkdownRenderPanel({ content }: { content: string }) {
+function MarkdownRenderPanel({
+  content,
+  loading,
+  error,
+}: {
+  content?: string;
+  loading?: boolean;
+  error?: string;
+}) {
   const [collapsed, setCollapsed] = useState(false);
-  const html = renderMarkdown(content);
+  const safeContent = content || '';
+  const html = renderMarkdown(safeContent);
+  const hasContent = safeContent.trim() !== '';
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 p-5 flex flex-col h-full">
+    <div className="bg-white rounded-xl border border-gray-200 p-5 flex flex-col">
       <div className="flex items-center justify-between mb-3">
         <h2 className="font-semibold text-gray-800 flex items-center gap-2">
           <FileText size={15} className="text-orange-500" /> Markdown 预览
         </h2>
         <div className="flex items-center gap-3">
-          <span className="text-xs text-gray-400">{content.length.toLocaleString()} 字符</span>
+          <span className="text-xs text-gray-400">{hasContent ? `${safeContent.length.toLocaleString()} 字符` : ''}</span>
           <button
             onClick={() => setCollapsed((v) => !v)}
             className="text-xs text-gray-400 hover:text-gray-600 flex items-center gap-0.5"
+            disabled={!hasContent && !loading && !error}
           >
             {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
             {collapsed ? '展开' : '收起'}
@@ -614,11 +625,24 @@ function MarkdownRenderPanel({ content }: { content: string }) {
         </div>
       </div>
       {!collapsed && (
-        <div
-          className="flex-1 overflow-auto rounded-lg border border-gray-100 bg-gray-50 p-4 min-h-[500px]"
-          // eslint-disable-next-line react/no-danger
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+        <div className="w-full aspect-[210/297] overflow-auto rounded-lg border border-gray-100 bg-gray-50 p-4">
+          {loading ? (
+            <div className="flex items-center justify-center h-full text-gray-400 text-xs gap-2">
+              <Loader size={14} className="animate-spin" /> 加载中...
+            </div>
+          ) : error ? (
+            <div className="flex items-center justify-center h-full text-gray-400 text-xs">
+              {error}
+            </div>
+          ) : hasContent ? (
+            // eslint-disable-next-line react/no-danger
+            <div dangerouslySetInnerHTML={{ __html: html }} />
+          ) : (
+            <div className="flex items-center justify-center h-full text-gray-300 text-xs">
+              暂无 Markdown 内容
+            </div>
+          )}
+        </div>
       )}
     </div>
   );
@@ -688,27 +712,35 @@ export function AssetDetailPage() {
 
   // 从 FileLineageCard 的 md 列表预览提升的 Markdown 内容
   const [lineageMdContent, setLineageMdContent] = useState<string>('');
+  const [mdBootLoading, setMdBootLoading] = useState(false);
+  const [mdBootError, setMdBootError] = useState('');
 
-  // 页面加载时自动拉取已有 markdown
+  const hasMdSource = !!(material?.metadata?.markdownObjectName || material?.metadata?.markdownUrl || material?.mineruZipUrl);
+
   useEffect(() => {
     const mdObj = material?.metadata?.markdownObjectName;
     const mdUrl = material?.metadata?.markdownUrl;
     if (!material?.id || (!mdObj && !mdUrl)) return;
 
+    setMdBootLoading(true);
+    setMdBootError('');
+
     (async () => {
       try {
         let url = mdUrl;
         if (!url && mdObj) {
-          const r = await fetch(`/__proxy/upload/presign?objectName=${encodeURIComponent(mdObj)}`);
+          const r = await fetch(`/__proxy/upload/presign?objectName=${encodeURIComponent(mdObj)}`, { cache: 'no-store' });
           const d = await r.json();
           url = d?.url;
         }
-        if (!url) return;
-        const res = await fetch(url);
-        if (!res.ok) return;
+        if (!url) throw new Error('无法获取 Markdown 访问地址');
+        const res = await fetch(url, { cache: 'no-store' });
+        if (!res.ok) throw new Error(`读取失败: HTTP ${res.status}`);
         setMineruMarkdown(await res.text());
-      } catch {
-        // 静默失败，避免打断页面
+      } catch (e) {
+        setMdBootError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setMdBootLoading(false);
       }
     })();
   }, [material?.id, material?.metadata?.markdownObjectName, material?.metadata?.markdownUrl]);
@@ -1223,9 +1255,9 @@ export function AssetDetailPage() {
   const previewMdContent = mineruMarkdown || lineageMdContent;
 
   return (
-    <div className="p-6 space-y-5">
+    <div className="h-full p-6 flex flex-col gap-5 overflow-hidden">
       {/* 返回 + 标题 */}
-      <div>
+      <div className="flex-shrink-0">
         <button
           onClick={handleBackToList}
           className="flex items-center gap-1.5 text-sm text-blue-600 hover:text-blue-700 mb-3"
@@ -1277,9 +1309,9 @@ export function AssetDetailPage() {
         </div>
       </div>
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-3">
+      <div className="flex-1 min-h-0 grid grid-cols-1 gap-5 lg:grid-cols-3 overflow-hidden">
         {/* 左侧 1/3：整合大卡（三步骤） */}
-        <div className="space-y-5">
+        <div className="space-y-5 min-h-0 overflow-y-auto pr-1">
           <div className="bg-white rounded-xl border border-gray-200 p-5">
             <h2 className="font-semibold text-gray-800 mb-4 flex items-center gap-2">
               <Database size={15} className="text-blue-500" /> 文件处理流程
@@ -1707,16 +1739,16 @@ export function AssetDetailPage() {
         </div>
 
         {/* 中间 1/3：PDF 预览 */}
-        <div className="space-y-5">
+        <div className="space-y-5 min-h-0 overflow-hidden">
           {objectName && material?.type?.toUpperCase() === 'PDF' && (
             <PDFPreviewPanel objectName={objectName} />
           )}
         </div>
 
         {/* 右侧 1/3：Markdown 预览 */}
-        <div className="space-y-5">
-          {previewMdContent && (
-            <MarkdownRenderPanel content={previewMdContent} />
+        <div className="space-y-5 min-h-0 overflow-hidden">
+          {(previewMdContent || hasMdSource || mdBootLoading || mdBootError) && (
+            <MarkdownRenderPanel content={previewMdContent} loading={mdBootLoading} error={mdBootError} />
           )}
         </div>
       </div>
