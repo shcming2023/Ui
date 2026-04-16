@@ -1748,12 +1748,71 @@ async function analyzeWithFallback(providers, systemPrompt, userPrompt, opts = {
   throw new Error(`所有 AI 提供商均失败：\n${summary}`);
 }
 
+function buildMarkdownContext(markdownText, maxChars) {
+  const max = Number.isFinite(Number(maxChars)) ? Number(maxChars) : 200000;
+  const limit = Math.max(10000, Math.min(200000, Math.floor(max)));
+  const text = String(markdownText || '');
+
+  if (text.length <= limit) return { context: text, totalChars: text.length, truncated: false };
+
+  const marker = '\n\n...[内容已截断]...\n\n';
+  const head = Math.floor(limit * 0.6);
+  const tail = Math.max(0, limit - head - marker.length);
+  const context = `${text.slice(0, head)}${marker}${text.slice(text.length - tail)}`;
+  return { context, totalChars: text.length, truncated: true };
+}
+
+app.post('/ai/test', async (req, res) => {
+  const provider = req.body?.provider && typeof req.body.provider === 'object'
+    ? req.body.provider
+    : req.body;
+
+  const apiEndpoint = String(provider?.apiEndpoint || '').trim();
+  const model = String(provider?.model || '').trim();
+  const name = String(provider?.name || provider?.id || 'AI');
+
+  if (!apiEndpoint || !model) {
+    res.status(400).json({ ok: false, message: '缺少 apiEndpoint 或 model' });
+    return;
+  }
+
+  const startedAt = Date.now();
+  try {
+    const systemPrompt = '你是一个测试助手，只需要输出 JSON。';
+    const userPrompt = '请仅返回：{\"ok\":true}';
+    const result = await callAiProvider(
+      {
+        id: String(provider?.id || 'test'),
+        name,
+        enabled: true,
+        apiEndpoint,
+        apiKey: String(provider?.apiKey || ''),
+        model,
+        timeout: Number(provider?.timeout || 60),
+        priority: 1,
+      },
+      systemPrompt,
+      userPrompt,
+    );
+    const ok = result && typeof result === 'object' && result.ok === true;
+    res.json({
+      ok,
+      message: ok ? `连接成功：${name}（${model}）` : `连接成功但返回不符合预期：${name}（${model}）`,
+      elapsedMs: Date.now() - startedAt,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    res.status(200).json({ ok: false, message, elapsedMs: Date.now() - startedAt });
+  }
+});
+
 app.post('/parse/analyze', async (req, res) => {
   const {
     markdownObjectName,
     markdownUrl,
     markdownContent,
     materialId,
+    maxMarkdownChars,
     // 新格式
     aiProviders,
     // 旧格式（向后兼容）
@@ -1839,7 +1898,7 @@ app.post('/parse/analyze', async (req, res) => {
       return;
     }
 
-    const mdSnippet = markdownText.slice(0, 8000);
+    const { context: mdContext, totalChars, truncated } = buildMarkdownContext(markdownText, maxMarkdownChars);
 
     // ── 2. 构建 Prompt ─────────────────────────────────────────
     const defaultPrompts = {
@@ -1861,7 +1920,7 @@ app.post('/parse/analyze', async (req, res) => {
     const userPrompt = `请分析以下教育资料内容，并按照指定格式返回结构化元数据：
 
 ---文档内容开始---
-${mdSnippet}
+${mdContext}
 ---文档内容结束---
 
 请提取以下信息并以 JSON 格式返回：
@@ -1881,6 +1940,8 @@ ${mdSnippet}
 1. tags 必须是字符串数组
 2. confidence 必须是 0-100 的整数
 3. 仅返回 JSON，不要有任何前缀或解释文字`;
+
+    console.log(`[upload-server] AI markdown context: total=${totalChars} chars, used=${mdContext.length} chars, truncated=${truncated}`);
 
     // ── 3. 多策略调用 AI ───────────────────────────────────────
     const { result: extracted, providerId, providerName } = await analyzeWithFallback(

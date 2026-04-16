@@ -188,6 +188,8 @@ export function SettingsPage() {
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [localTesting, setLocalTesting] = useState(false);
   const [localTestResult, setLocalTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [aiTestingId, setAiTestingId] = useState<string | null>(null);
+  const [aiTestResult, setAiTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   // 保存中状态
   const [savingMinio, setSavingMinio] = useState(false);
   const [backupLoading, setBackupLoading] = useState(false);
@@ -300,6 +302,29 @@ export function SettingsPage() {
   const handleSaveAi = () => {
     dispatch({ type: 'UPDATE_AI_CONFIG', payload: aiForm });
     toast.success('AI 配置已保存');
+  };
+
+  const handleTestAiProvider = async (provider: AiProvider) => {
+    setAiTestingId(provider.id);
+    setAiTestResult(null);
+    try {
+      const resp = await fetch('/__proxy/upload/ai/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider }),
+      });
+      const data = await resp.json().catch(() => null);
+      const ok = !!data?.ok;
+      const message = String(data?.message || (ok ? '连接成功' : '连接失败'));
+      setAiTestResult({ ok, message });
+      if (ok) toast.success(message); else toast.error(message);
+    } catch (e) {
+      const message = `请求失败：${e instanceof Error ? e.message : String(e)}`;
+      setAiTestResult({ ok: false, message });
+      toast.error(message);
+    } finally {
+      setAiTestingId(null);
+    }
   };
 
   const handleSaveMineru = () => {
@@ -620,6 +645,20 @@ export function SettingsPage() {
       {/* ===== AI 配置 ===== */}
       {activeTab === 'ai' && (
         <div className="space-y-5">
+          <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-3">
+            <h2 className="font-semibold text-gray-800">输入控制</h2>
+            <FieldRow
+              label="Markdown 最大输入字符数"
+              hint="建议 <= 200000（约 200K），避免本地模型上下文溢出；系统会自动截断并保留头尾内容以兼顾质量。"
+            >
+              <Input
+                type="number"
+                value={Number(aiForm.maxMarkdownChars || 200000)}
+                onChange={(v) => updateAi({ maxMarkdownChars: Number(v) })}
+              />
+            </FieldRow>
+          </div>
+
           {/* 多提供商列表 */}
           <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">
             <div className="flex items-center justify-between">
@@ -694,6 +733,15 @@ export function SettingsPage() {
                       placeholder="提供商名称"
                     />
                     <div className="flex items-center gap-1 flex-shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handleTestAiProvider(provider)}
+                        disabled={aiTestingId === provider.id}
+                        className="px-2 py-1 text-[11px] rounded border border-gray-200 bg-white text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                        title="测试连接"
+                      >
+                        {aiTestingId === provider.id ? '测试中...' : '测试'}
+                      </button>
                       <button type="button" onClick={moveUp} disabled={idx === 0} className="p-1 text-gray-400 hover:text-gray-600 disabled:opacity-30" title="上移">
                         <ChevronUp size={14} />
                       </button>
@@ -758,6 +806,12 @@ export function SettingsPage() {
               * AI 分析时按优先级顺序依次尝试各提供商，第一个成功即返回结果。429/401 等错误自动跳过到下一个。Ollama 作为本地兜底无需 API Key。
             </p>
           </div>
+
+          {aiTestResult && (
+            <div className={`flex items-start gap-2 p-3 rounded-lg text-sm ${aiTestResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
+              <span>{aiTestResult.message}</span>
+            </div>
+          )}
 
           {/* 提示词配置 */}
           <div className="bg-white rounded-xl border border-gray-200 p-5 space-y-4">

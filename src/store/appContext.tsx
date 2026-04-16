@@ -123,9 +123,13 @@ function sanitizeAssetDetailsForPersistence(details: Record<number, AssetDetail>
 }
 
 function sanitizeAiConfigForLocalStorage(config: AiConfig): AiConfig {
+  const providers = Array.isArray(config.providers)
+    ? config.providers.map((p) => ({ ...p, apiKey: '' }))
+    : config.providers;
   return {
     ...config,
     apiKey: '',
+    ...(providers ? { providers } : {}),
   };
 }
 

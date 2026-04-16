@@ -306,6 +306,7 @@ export interface AiConfig {
   timeout: number;
   prompts: AiPromptConfig;
   maxFileSize: number; // AI 分析最大文件大小（字节），默认 50MB
+  maxMarkdownChars?: number; // AI 分析输入 Markdown 最大字符数（建议 <= 200k）
   enabledFileTypes: string[]; // 支持的文件类型
 }
 

@@ -74,14 +74,24 @@ export const initialAiRuleSettings: AiRuleSettings = {
 /** AI 多提供商默认配置（按优先级排列） */
 export const initialAiProviders: AiProvider[] = [
   {
+    id: 'ollama',
+    name: 'Ollama（默认）',
+    enabled: true,
+    apiEndpoint: 'http://host.docker.internal:11434/v1/chat/completions',
+    apiKey: '',
+    model: 'qwen3.5:27b',
+    timeout: 600,
+    priority: 1,
+  },
+  {
     id: 'moonshot',
     name: 'Moonshot',
-    enabled: true,
+    enabled: false,
     apiEndpoint: 'https://api.moonshot.cn/v1/chat/completions',
     apiKey: '',
     model: 'moonshot-v1-32k',
     timeout: 300,
-    priority: 1,
+    priority: 2,
   },
   {
     id: 'kimi',
@@ -91,7 +101,7 @@ export const initialAiProviders: AiProvider[] = [
     apiKey: '',
     model: 'moonshot-v1-32k',
     timeout: 300,
-    priority: 2,
+    priority: 3,
   },
   {
     id: 'openai',
@@ -101,16 +111,6 @@ export const initialAiProviders: AiProvider[] = [
     apiKey: '',
     model: 'gpt-4o-mini',
     timeout: 300,
-    priority: 3,
-  },
-  {
-    id: 'ollama',
-    name: 'Ollama（本地兜底）',
-    enabled: false,
-    apiEndpoint: 'http://localhost:11434/v1/chat/completions',
-    apiKey: '',
-    model: 'llama3.2',
-    timeout: 600,
     priority: 4,
   },
 ];
@@ -118,11 +118,12 @@ export const initialAiProviders: AiProvider[] = [
 /** AI 识别配置（默认值） */
 export const initialAiConfig: AiConfig = {
   providers: initialAiProviders,
-  apiEndpoint: 'https://api.moonshot.cn/v1/chat/completions',
+  apiEndpoint: 'http://host.docker.internal:11434/v1/chat/completions',
   apiKey: '',
-  model: 'moonshot-v1-32k',
-  timeout: 300, // 默认 5 分钟，适应大文本识别需求
+  model: 'qwen3.5:27b',
+  timeout: 600,
   maxFileSize: 50 * 1024 * 1024, // AI 分析最大 50MB
+  maxMarkdownChars: 200000,
   enabledFileTypes: ['.pdf', '.docx', '.doc', '.txt', '.md'],
   prompts: {
     title: '根据以下教育资料的内容，生成一个简洁准确的中文资料名称。要求：包含学科、年级、内容类型等关键信息，长度不超过30字。',

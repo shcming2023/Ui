@@ -1137,6 +1137,7 @@ export function AssetDetailPage() {
           markdownUrl,
           ...(finalInlineContent ? { markdownContent: finalInlineContent } : {}),
           materialId: numId,
+          maxMarkdownChars: Math.max(10_000, Math.min(200_000, Number(state.aiConfig.maxMarkdownChars || 200_000))),
           // 新格式：传递 providers 数组
           ...(enabledProviders && enabledProviders.length > 0
             ? { aiProviders: enabledProviders }
