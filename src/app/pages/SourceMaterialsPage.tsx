@@ -84,6 +84,9 @@ export function SourceMaterialsPage() {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const uploadHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const serverQueueStartedRef = useRef(false);
+  const lastServerQueueSyncAtRef = useRef(0);
 
   const [tab, setTab] = useState<TabFilter>('all');
   const [search, setSearch] = useState('');
@@ -160,6 +163,7 @@ export function SourceMaterialsPage() {
 
   const [uploadServerOk, setUploadServerOk] = useState<boolean | null>(null);
   const [mineruOk, setMineruOk] = useState<boolean | null>(null);
+  const [uploadProgress, setUploadProgress] = useState<{ done: number; total: number; failed: number } | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -256,22 +260,44 @@ export function SourceMaterialsPage() {
 
     // 后端队列模式：先上传文件到 MinIO，然后提交到后端队列
     setBatchUploading(true);
-    toast.info(`正在上传 ${validFiles.length} 个文件到存储服务...`);
-
-    const serverJobs: Array<{
-      id: string; fileName: string; fileSize: number; path: string;
-      objectName: string; mimeType: string; materialId: number;
-    }> = [];
+    if (uploadHideTimerRef.current) {
+      clearTimeout(uploadHideTimerRef.current);
+      uploadHideTimerRef.current = null;
+    }
+    setUploadProgress({ done: 0, total: validFiles.length, failed: 0 });
 
     let idCounter = 0;
-    for (const file of validFiles) {
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const uploadOne = async (file: File) => {
       const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
       idCounter = (idCounter + 1) % 1000;
       const materialId = Date.now() * 1000 + idCounter;
 
+      dispatch({
+        type: 'ADD_MATERIAL',
+        payload: {
+          id: materialId,
+          title: file.name.replace(/\.[^.]+$/, ''),
+          type: file.name.split('.').pop()?.toUpperCase() ?? 'FILE',
+          size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
+          sizeBytes: file.size,
+          uploadTime: '上传中...',
+          uploadTimestamp: Date.now(),
+          status: 'processing',
+          mineruStatus: 'pending',
+          aiStatus: 'pending',
+          tags: [],
+          metadata: {
+            relativePath: filePath,
+            processingStage: 'upload',
+            processingMsg: '正在上传文件...',
+            processingProgress: '0',
+            processingUpdatedAt: new Date().toISOString(),
+          },
+          uploader: '当前用户',
+        },
+      });
+
       try {
-        // 上传文件到 MinIO
         const formData = new FormData();
         formData.append('file', file);
         formData.append('materialId', String(materialId));
@@ -283,70 +309,67 @@ export function SourceMaterialsPage() {
 
         if (!uploadRes.ok) {
           const errText = await uploadRes.text();
-          toast.error(`上传失败: ${file.name} - ${errText}`);
-          continue;
+          throw new Error(errText || `HTTP ${uploadRes.status}`);
         }
 
         const uploadResult = await uploadRes.json();
+        const objectName = String(uploadResult?.objectName || '').trim();
+        if (!objectName) {
+          throw new Error('上传成功但未获得 objectName（未写入 MinIO）');
+        }
 
-        // 创建 material 记录
         dispatch({
-          type: 'ADD_MATERIAL',
+          type: 'UPDATE_MATERIAL',
           payload: {
             id: materialId,
-            title: file.name.replace(/\.[^.]+$/, ''),
-            type: file.name.split('.').pop()?.toUpperCase() ?? 'FILE',
-            size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
-            sizeBytes: file.size,
-            uploadTime: '刚刚',
-            uploadTimestamp: Date.now(),
-            status: 'processing',
-            mineruStatus: 'pending',
-            aiStatus: 'pending',
-            tags: [],
-            metadata: {
-              relativePath: filePath,
-              fileUrl: uploadResult.url,
-              objectName: uploadResult.objectName || '',
-              fileName: uploadResult.fileName,
-              provider: uploadResult.provider,
-              mimeType: uploadResult.mimeType,
-              ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
-              ...(uploadResult.format ? { format: uploadResult.format } : {}),
-              processingStage: 'mineru',
-              processingMsg: '等待后端队列处理',
-              processingProgress: '0',
-              processingUpdatedAt: new Date().toISOString(),
+            updates: {
+              uploadTime: '刚刚',
+              metadata: {
+                relativePath: filePath,
+                fileUrl: uploadResult.url,
+                objectName,
+                fileName: uploadResult.fileName,
+                provider: uploadResult.provider,
+                mimeType: uploadResult.mimeType,
+                ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
+                ...(uploadResult.format ? { format: uploadResult.format } : {}),
+                processingStage: 'mineru',
+                processingMsg: '等待后端队列处理',
+                processingProgress: '0',
+                processingUpdatedAt: new Date().toISOString(),
+              },
             },
-            uploader: '当前用户',
           },
         });
 
-        serverJobs.push({
-          id,
+        const job = {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
           fileName: file.name,
           fileSize: file.size,
           path: filePath,
-          objectName: uploadResult.objectName || '',
-          mimeType: uploadResult.mimeType || 'application/pdf',
+          objectName,
+          mimeType: uploadResult.mimeType || file.type || 'application/pdf',
           materialId,
-        });
-      } catch (err) {
-        toast.error(`上传异常: ${file.name} - ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+        };
 
-    // 提交到后端队列
-    if (serverJobs.length > 0) {
-      try {
         const addRes = await fetch('/__proxy/upload/batch/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobs: serverJobs }),
+          body: JSON.stringify({ jobs: [job] }),
         });
-        if (addRes.ok) {
-          toast.success(`已提交 ${serverJobs.length} 个文件到后端处理队列`);
-          dispatch({ type: 'BATCH_SET_UI_OPEN', payload: { uiOpen: true } });
+        if (!addRes.ok) {
+          const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
+          throw new Error((errData as { error?: string }).error || `HTTP ${addRes.status}`);
+        }
+
+        if (!serverQueueStartedRef.current) {
+          serverQueueStartedRef.current = true;
+          await fetch('/__proxy/upload/batch/start', { method: 'POST' }).catch(() => {});
+        }
+
+        const now = Date.now();
+        if (now - lastServerQueueSyncAtRef.current > 1000) {
+          lastServerQueueSyncAtRef.current = now;
           try {
             const statusRes = await fetch('/__proxy/upload/batch/status', { signal: AbortSignal.timeout(5000) });
             if (statusRes.ok) {
@@ -354,14 +377,52 @@ export function SourceMaterialsPage() {
               dispatch({ type: 'SERVER_BATCH_SYNC', payload: data });
             }
           } catch {}
-        } else {
-          const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
-          toast.error(`提交队列失败: ${(errData as { error?: string }).error || '未知错误'}`);
         }
       } catch (err) {
-        toast.error(`提交队列异常: ${err instanceof Error ? err.message : String(err)}`);
+        const msg = err instanceof Error ? err.message : String(err);
+        dispatch({
+          type: 'UPDATE_MATERIAL',
+          payload: {
+            id: materialId,
+            updates: {
+              status: 'failed',
+              mineruStatus: 'failed',
+              aiStatus: 'failed',
+              uploadTime: '上传失败',
+              metadata: {
+                processingStage: '',
+                processingMsg: `上传失败：${msg}`,
+                processingUpdatedAt: new Date().toISOString(),
+              },
+            },
+          },
+        });
+        setUploadProgress((prev) => (prev ? { ...prev, failed: prev.failed + 1 } : prev));
+      } finally {
+        setUploadProgress((prev) => {
+          if (!prev) return prev;
+          const next = { ...prev, done: prev.done + 1 };
+          if (next.done >= next.total) {
+            uploadHideTimerRef.current = setTimeout(() => {
+              setUploadProgress(null);
+              uploadHideTimerRef.current = null;
+            }, 2000);
+          }
+          return next;
+        });
       }
-    }
+    };
+
+    const concurrency = 3;
+    let idx = 0;
+    const runners = Array.from({ length: Math.min(concurrency, validFiles.length) }, async () => {
+      while (idx < validFiles.length) {
+        const current = validFiles[idx];
+        idx += 1;
+        await uploadOne(current);
+      }
+    });
+    await Promise.all(runners);
 
     setBatchUploading(false);
   };
@@ -454,6 +515,23 @@ export function SourceMaterialsPage() {
             <p className="text-slate-500 text-sm">
               管理上传的教育资料 · 共 {state.materials.length} 条
             </p>
+            {uploadProgress && (
+              <div className="mt-3">
+                <div className="flex items-center justify-between text-xs text-slate-500 mb-1">
+                  <span>
+                    上传进度：已完成 {uploadProgress.done} / {uploadProgress.total}
+                    {uploadProgress.failed > 0 ? `（失败 ${uploadProgress.failed}）` : ''}
+                  </span>
+                  <span>{Math.round((uploadProgress.done / Math.max(1, uploadProgress.total)) * 100)}%</span>
+                </div>
+                <div className="h-2 bg-slate-200 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-600 transition-all"
+                    style={{ width: `${Math.round((uploadProgress.done / Math.max(1, uploadProgress.total)) * 100)}%` }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
           <div className="flex items-center gap-2">
             {selectedIds.size > 0 && (
@@ -492,12 +570,12 @@ export function SourceMaterialsPage() {
             {/* @ts-expect-error webkitdirectory is a non-standard attribute */}
             <input ref={folderInputRef} type="file" webkitdirectory="true" directory="true" className="hidden" onChange={handleBatchFileSelect} />
             <div className="flex bg-blue-600 rounded-xl overflow-hidden text-white text-sm font-semibold hover:bg-blue-700 transition-colors">
-              <button data-testid="upload-button" onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700">
+              <button data-testid="upload-button" disabled={batchUploading} onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed">
                 <Upload size={15} />
                 文件
               </button>
               <div className="w-px bg-blue-500 my-2" />
-              <button onClick={() => folderInputRef.current?.click()} className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700" title="上传整个文件夹">
+              <button disabled={batchUploading} onClick={() => folderInputRef.current?.click()} className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed" title="上传整个文件夹">
                 <FolderPlus size={15} />
                 文件夹
               </button>
