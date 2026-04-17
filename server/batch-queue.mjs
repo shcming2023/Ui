@@ -198,6 +198,10 @@ export async function restoreBatchQueue() {
           }))
           .slice(-200)
       : [];
+    if (batchQueue.alerts.length > 0) {
+      const existingJobIds = new Set(batchQueue.items.map((j) => j.id));
+      batchQueue.alerts = batchQueue.alerts.filter((a) => !a?.jobId || existingJobIds.has(String(a.jobId)));
+    }
     alertCounter = batchQueue.alerts.length;
     batchQueue.running = saved.running || false;
     batchQueue.paused = saved.paused || false;
