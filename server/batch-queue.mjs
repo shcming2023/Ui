@@ -125,6 +125,8 @@ async function persistBatchQueue() {
         error: j.error || '', retries: j.retries, maxRetries: j.maxRetries,
         markdownObjectName: j.markdownObjectName || '',
         markdownUrl: j.markdownUrl || '',
+        mineruTaskId: j.mineruTaskId || '',
+        mineruSubmittedAt: j.mineruSubmittedAt || 0,
         createdAt: j.createdAt, updatedAt: j.updatedAt,
       })),
       running: batchQueue.running,
@@ -155,13 +157,23 @@ export async function restoreBatchQueue() {
     const saved = settings?.serverBatchQueue;
     if (!saved || !Array.isArray(saved.items)) return;
 
-    batchQueue.items = saved.items.map(j => ({
-      ...j,
-      // 重启后将 running 状态的任务重置为 pending 以便重试
-      status: ['uploading', 'mineru', 'ai'].includes(j.status) ? 'pending' : j.status,
-      retries: j.retries || 0,
-      maxRetries: j.maxRetries || BATCH_MAX_RETRIES,
-    }));
+    batchQueue.items = saved.items.map(j => {
+      const mineruTaskId = String(j.mineruTaskId || '').trim();
+      const status = String(j.status || '');
+      return {
+        ...j,
+        mineruTaskId,
+        mineruSubmittedAt: Number(j.mineruSubmittedAt || 0),
+        status:
+          status === 'mineru' && mineruTaskId
+            ? 'mineru'
+            : ['uploading', 'ai'].includes(status)
+              ? 'pending'
+              : status,
+        retries: j.retries || 0,
+        maxRetries: j.maxRetries || BATCH_MAX_RETRIES,
+      };
+    });
     batchQueue.running = saved.running || false;
     batchQueue.paused = saved.paused || false;
     batchQueue.autoMinerU = saved.autoMinerU !== false;
@@ -262,6 +274,20 @@ function isAbortError(err) {
   const name = err && typeof err === 'object' && 'name' in err ? String(err.name || '') : '';
   const msg = err instanceof Error ? err.message : String(err || '');
   return name === 'AbortError' || /aborted due to timeout/i.test(msg) || /operation was aborted/i.test(msg);
+}
+
+function classifyJobError(message) {
+  const msg = String(message || '');
+  const lower = msg.toLowerCase();
+  if (
+    /hub/.test(lower) ||
+    /huggingface/.test(lower) ||
+    /hf hub/.test(lower) ||
+    /download/.test(lower) && /model/.test(lower)
+  ) {
+    return 'config';
+  }
+  return 'transient';
 }
 
 function checkMemoryPressure() {
@@ -398,52 +424,60 @@ async function processOneJob(job) {
 
   console.log(`[batch-queue] Processing ${job.fileName} (${(fileBuffer.length / 1024 / 1024).toFixed(1)} MB) via MinerU`);
 
-  // 提交 MinerU 任务
-  const fastApiForm = new FormData();
-  fastApiForm.append(
-    'files',
-    new Blob([fileBuffer], { type: job.mimeType || 'application/octet-stream' }),
-    job.fileName,
-  );
-  fastApiForm.append('backend', backend);
-  for (const lang of String(ocrLanguage || 'ch').split(',').map(s => s.trim()).filter(Boolean)) {
-    fastApiForm.append('lang_list', lang);
-  }
-  let parseMethod = 'auto';
-  if (enableOcr) parseMethod = 'ocr';
-  fastApiForm.append('parse_method', parseMethod);
-  fastApiForm.append('formula_enable', String(enableFormula));
-  fastApiForm.append('table_enable', String(enableTable));
-  const rawServerUrl = String(mineruConfig.localServerUrl || '').trim();
-  const serverUrl = dockerRewriteEndpoint(rawServerUrl || (/vlm|hybrid/i.test(backend) ? 'http://localhost:30000' : ''));
-  if (serverUrl) fastApiForm.append('server_url', serverUrl);
-  fastApiForm.append('return_md', 'true');
-  fastApiForm.append('response_format_zip', 'false');
-  if (Number.isFinite(maxPages) && maxPages > 0) {
-    fastApiForm.append('end_page_id', String(Math.max(0, Math.floor(maxPages) - 1)));
-  }
-
   const abortSignal = currentAbortController?.signal || null;
-  const mineruSubmitSignal = mergeAbortSignals([abortSignal, AbortSignal.timeout(timeoutMs)]);
-  const fastApiResponse = await fetch(`${localEndpoint}/tasks`, {
-    method: 'POST',
-    body: fastApiForm,
-    signal: mineruSubmitSignal,
-  });
+  let mineruTaskId = String(job.mineruTaskId || '').trim();
 
-  if (!fastApiResponse.ok) {
-    const payload = await fastApiResponse.json().catch(() => ({}));
-    const error = String(payload?.error || payload?.message || payload?.detail || '');
-    throw new Error(`MinerU 任务提交失败: ${error || `HTTP ${fastApiResponse.status}`}`);
-  }
-
-  const taskPayload = await fastApiResponse.json().catch(() => null);
-  const mineruTaskId = String(taskPayload?.task_id || '').trim();
   if (!mineruTaskId) {
-    throw new Error(`MinerU 未返回 task_id`);
+    const fastApiForm = new FormData();
+    fastApiForm.append(
+      'files',
+      new Blob([fileBuffer], { type: job.mimeType || 'application/octet-stream' }),
+      job.fileName,
+    );
+    fastApiForm.append('backend', backend);
+    for (const lang of String(ocrLanguage || 'ch').split(',').map(s => s.trim()).filter(Boolean)) {
+      fastApiForm.append('lang_list', lang);
+    }
+    let parseMethod = 'auto';
+    if (enableOcr) parseMethod = 'ocr';
+    fastApiForm.append('parse_method', parseMethod);
+    fastApiForm.append('formula_enable', String(enableFormula));
+    fastApiForm.append('table_enable', String(enableTable));
+    const rawServerUrl = String(mineruConfig.localServerUrl || '').trim();
+    const serverUrl = dockerRewriteEndpoint(rawServerUrl || (/vlm|hybrid/i.test(backend) ? 'http://localhost:30000' : ''));
+    if (serverUrl) fastApiForm.append('server_url', serverUrl);
+    fastApiForm.append('return_md', 'true');
+    fastApiForm.append('response_format_zip', 'false');
+    if (Number.isFinite(maxPages) && maxPages > 0) {
+      fastApiForm.append('end_page_id', String(Math.max(0, Math.floor(maxPages) - 1)));
+    }
+
+    const mineruSubmitSignal = mergeAbortSignals([abortSignal, AbortSignal.timeout(timeoutMs)]);
+    const fastApiResponse = await fetch(`${localEndpoint}/tasks`, {
+      method: 'POST',
+      body: fastApiForm,
+      signal: mineruSubmitSignal,
+    });
+
+    if (!fastApiResponse.ok) {
+      const payload = await fastApiResponse.json().catch(() => ({}));
+      const error = String(payload?.error || payload?.message || payload?.detail || '');
+      throw new Error(`MinerU 任务提交失败: ${error || `HTTP ${fastApiResponse.status}`}`);
+    }
+
+    const taskPayload = await fastApiResponse.json().catch(() => null);
+    mineruTaskId = String(taskPayload?.task_id || '').trim();
+    if (!mineruTaskId) {
+      throw new Error(`MinerU 未返回 task_id`);
+    }
+
+    updateJob(job.id, { mineruTaskId, mineruSubmittedAt: Date.now() });
+    persistBatchQueue();
+    console.log(`[batch-queue] MinerU task submitted: ${mineruTaskId} for ${job.fileName}`);
+  } else {
+    console.log(`[batch-queue] Reusing MinerU task_id=${mineruTaskId} for ${job.fileName}`);
   }
 
-  console.log(`[batch-queue] MinerU task submitted: ${mineruTaskId} for ${job.fileName}`);
   updateJob(job.id, { progress: 50, message: `MinerU 任务 ${mineruTaskId} 处理中...` });
 
   // 轮询等待完成
@@ -728,6 +762,26 @@ async function batchWorkerLoop() {
             metadata: {
               processingStage: '',
               processingMsg: '已取消',
+              processingUpdatedAt: new Date().toISOString(),
+            },
+          });
+        }
+        continue;
+      }
+
+      const errType = classifyJobError(message);
+      if (errType === 'config') {
+        updateJob(job.id, {
+          status: 'error',
+          message: `处理失败（需人工处理）: ${message}`,
+          error: message,
+        });
+        if (job.materialId) {
+          await syncMaterialToDb(job.materialId, {
+            status: 'failed',
+            metadata: {
+              processingStage: '',
+              processingMsg: `处理失败（需人工处理）: ${message}`,
               processingUpdatedAt: new Date().toISOString(),
             },
           });

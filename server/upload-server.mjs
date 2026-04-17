@@ -761,10 +761,20 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
     return controller.signal;
   };
 
-  const start = Date.now();
+  const silenceTimeoutMs = 15 * 60 * 1000;
+  let lastSuccessfulPollAt = Date.now();
   let lastStatus = '';
   let lastPayload = null;
-  while (Date.now() - start < timeoutMs) {
+  while (true) {
+    if (signal?.aborted) {
+      const err = new Error('已取消');
+      err.name = 'AbortError';
+      throw err;
+    }
+    if (Date.now() - lastSuccessfulPollAt > silenceTimeoutMs) {
+      const snippet = lastPayload ? JSON.stringify(lastPayload).slice(0, 200) : '';
+      throw new Error(`MinerU 状态查询超时（连续 ${Math.round(silenceTimeoutMs / 60000)}min 无成功响应，taskId=${taskId}，lastStatus=${lastStatus || '-'}）${snippet ? `：${snippet}` : ''}`);
+    }
     const pollTimeoutMs = Math.min(30_000, timeoutMs);
     let response;
     try {
@@ -773,6 +783,7 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
       });
     } catch (err) {
       if (isAbortTimeout(err)) {
+        if (signal?.aborted) throw err;
         await new Promise((resolve) => setTimeout(resolve, 1500));
         continue;
       }
@@ -784,6 +795,7 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
       throw new Error(`查询任务状态失败: HTTP ${response.status} ${detail}`.trim());
     }
 
+    lastSuccessfulPollAt = Date.now();
     lastPayload = payload;
     const statusValue =
       payload?.status ??
@@ -809,8 +821,6 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
-  const snippet = lastPayload ? JSON.stringify(lastPayload).slice(0, 200) : '';
-  throw new Error(`等待 MinerU 任务超时（taskId=${taskId}，lastStatus=${lastStatus || '-'}）${snippet ? `：${snippet}` : ''}`);
 }
 
 async function fetchMinerUResult(localEndpoint, taskId, timeoutMs, signal = null) {
