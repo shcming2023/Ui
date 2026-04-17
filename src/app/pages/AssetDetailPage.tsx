@@ -932,14 +932,14 @@ export function AssetDetailPage() {
       return;
     }
 
+    let objectName = String(material.metadata?.objectName || '').trim();
+    const fileUrl = String(material.metadata?.fileUrl || '').trim();
+    if (!objectName && !fileUrl) {
+      toast.error('文件尚未上传或缺少访问地址');
+      return;
+    }
+
     try {
-      let objectName = String(material.metadata?.objectName || '').trim();
-      const fileUrl = String(material.metadata?.fileUrl || '').trim();
-
-      if (!objectName && !fileUrl) {
-        throw new Error('文件尚未上传或缺少访问地址');
-      }
-
       if (!objectName && fileUrl) {
         const blob = await fetch(fileUrl).then((r) => {
           if (!r.ok) throw new Error(`下载文件失败: HTTP ${r.status}`);
@@ -997,10 +997,12 @@ export function AssetDetailPage() {
         throw new Error((errData as { error?: string }).error || `HTTP ${addRes.status}`);
       }
 
+      const startBody = state.serverBatchQueue
+        ? JSON.stringify({ autoMinerU: state.serverBatchQueue.autoMinerU, autoAI: state.serverBatchQueue.autoAI })
+        : '';
       await fetch('/__proxy/upload/batch/start', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoMinerU: true, autoAI: true }),
+        ...(startBody ? { headers: { 'Content-Type': 'application/json' }, body: startBody } : {}),
       }).catch(() => {});
 
       dispatch({

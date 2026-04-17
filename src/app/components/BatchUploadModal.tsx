@@ -376,7 +376,7 @@ export function BatchProcessingController() {
     processOne(nextPending, file).finally(() => {
       setWorking(false);
     });
-  }, [autoAI, autoMinerU, dispatch, nextPending, paused, running, state.aiConfig, state.mineruConfig, working]);
+  }, [autoAI, autoMinerU, dispatch, nextPending, paused, running, working]);
 
   return null;
 }
