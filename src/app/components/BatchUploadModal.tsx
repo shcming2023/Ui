@@ -589,6 +589,19 @@ export function BatchProcessingController() {
 // ─── 后端批处理队列控制面板 ────────────────────────────────────
 
 function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
+  const { dispatch } = useAppStore();
+
+  const refresh = async () => {
+    try {
+      const res = await fetch('/__proxy/upload/batch/status', { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json();
+        dispatch({ type: 'SERVER_BATCH_SYNC', payload: data });
+      }
+    } catch {
+    }
+  };
+
   const handleStart = async () => {
     try {
       await fetch('/__proxy/upload/batch/start', {
@@ -597,6 +610,7 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
         body: JSON.stringify({ autoMinerU: queue.autoMinerU, autoAI: queue.autoAI }),
       });
       toast.success('后端队列已启动');
+      await refresh();
     } catch (e) {
       toast.error(`启动失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -606,6 +620,7 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
     try {
       await fetch('/__proxy/upload/batch/pause', { method: 'POST' });
       toast.info('后端队列已暂停');
+      await refresh();
     } catch (e) {
       toast.error(`暂停失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -615,6 +630,7 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
     try {
       await fetch('/__proxy/upload/batch/resume', { method: 'POST' });
       toast.success('后端队列已恢复');
+      await refresh();
     } catch (e) {
       toast.error(`恢复失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -624,8 +640,21 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
     try {
       await fetch('/__proxy/upload/batch/stop', { method: 'POST' });
       toast.info('后端队列已停止');
+      await refresh();
     } catch (e) {
       toast.error(`停止失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleCancelCurrent = async () => {
+    const current = queue.items.find((j) => j.status === 'uploaded' || j.status === 'mineru' || j.status === 'ai');
+    if (!current) return;
+    try {
+      await fetch(`/__proxy/upload/batch/cancel/${encodeURIComponent(current.id)}`, { method: 'POST' });
+      toast.info('已请求终止当前任务');
+      await refresh();
+    } catch (e) {
+      toast.error(`终止失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -634,6 +663,7 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
       const res = await fetch('/__proxy/upload/batch/retry-failed', { method: 'POST' });
       const data = await res.json();
       toast.success(`已重试 ${data.retried || 0} 个失败任务`);
+      await refresh();
     } catch (e) {
       toast.error(`重试失败: ${e instanceof Error ? e.message : String(e)}`);
     }
@@ -644,13 +674,35 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
       const res = await fetch('/__proxy/upload/batch/clear-completed', { method: 'POST' });
       const data = await res.json();
       toast.success(`已清理 ${data.removed || 0} 个已完成任务`);
+      await refresh();
     } catch (e) {
       toast.error(`清理失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
+  const handleClearAll = async () => {
+    try {
+      await fetch('/__proxy/upload/batch/clear-all', { method: 'POST' });
+      toast.success('已清空后端队列');
+      await refresh();
+    } catch (e) {
+      toast.error(`清空失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
+  const handleRemoveJob = async (id: string) => {
+    try {
+      await fetch(`/__proxy/upload/batch/job/${encodeURIComponent(id)}`, { method: 'DELETE' });
+      toast.success('已移除任务');
+      await refresh();
+    } catch (e) {
+      toast.error(`移除失败: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
+
   const isRunning = queue.running && !queue.paused;
   const isPaused = queue.running && queue.paused;
+  const hasProcessing = queue.items.some((j) => j.status === 'uploaded' || j.status === 'mineru' || j.status === 'ai');
 
   return (
     <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
@@ -687,12 +739,22 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
           )}
           {queue.running && (
             <button onClick={handleStop} className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
-              停止
+              停止队列
+            </button>
+          )}
+          {queue.running && hasProcessing && (
+            <button onClick={handleCancelCurrent} className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
+              终止当前
             </button>
           )}
           {queue.errors > 0 && (
             <button onClick={handleRetryFailed} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50">
               <RotateCcw size={14} /> 重试失败
+            </button>
+          )}
+          {queue.total > 0 && (
+            <button onClick={handleClearAll} className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
+              <Trash2 size={14} /> 清空全部
             </button>
           )}
           {queue.completed > 0 && (
@@ -722,10 +784,21 @@ function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState }) {
                     <span className="flex items-center gap-1 text-xs text-green-600"><CheckCircle2 size={12} /> 完成</span>
                   ) : job.status === 'error' ? (
                     <span className="flex items-center gap-1 text-xs text-red-600"><AlertCircle size={12} /> 失败</span>
+                  ) : job.status === 'skipped' ? (
+                    <span className="text-xs text-gray-500">已取消</span>
                   ) : job.status === 'pending' ? (
                     <span className="text-xs text-gray-500">等待中</span>
                   ) : (
                     <span className="flex items-center gap-1 text-xs text-blue-600"><Loader size={12} className="animate-spin" /> {job.progress}%</span>
+                  )}
+                  {!(job.status === 'uploaded' || job.status === 'mineru' || job.status === 'ai') && (
+                    <button
+                      onClick={() => handleRemoveJob(job.id)}
+                      className="p-1.5 text-red-500 hover:bg-red-50 rounded"
+                      title="移除"
+                    >
+                      <X size={14} />
+                    </button>
                   )}
                 </div>
               </div>

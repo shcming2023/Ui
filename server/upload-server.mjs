@@ -44,6 +44,7 @@ import os from 'os';
 import {
   initBatchQueue, restoreBatchQueue, getQueueStatus,
   addJobs, startQueue, pauseQueue, resumeQueue, stopQueue,
+  cancelJob, cancelCurrentJob,
   retryFailed, retryJob, removeJob, clearCompleted, clearAll,
   shutdown as shutdownBatchQueue,
 } from './batch-queue.mjs';
@@ -739,11 +740,25 @@ async function callGradioToMarkdown(localEndpoint, fileBuffer, fileName, mimeTyp
   return mdResp.text();
 }
 
-async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress) {
+async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, signal = null) {
   const isAbortTimeout = (err) => {
     const name = err && typeof err === 'object' && 'name' in err ? String(err.name || '') : '';
     const msg = err instanceof Error ? err.message : String(err || '');
     return name === 'AbortError' || /aborted due to timeout/i.test(msg) || /operation was aborted/i.test(msg);
+  };
+  const mergeSignals = (a, b) => {
+    const list = [a, b].filter(Boolean);
+    if (list.length === 0) return null;
+    if (list.length === 1) return list[0];
+    const anyFn = AbortSignal && typeof AbortSignal.any === 'function' ? AbortSignal.any.bind(AbortSignal) : null;
+    if (anyFn) return anyFn(list);
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    for (const s of list) {
+      if (s.aborted) { controller.abort(); break; }
+      s.addEventListener('abort', onAbort, { once: true });
+    }
+    return controller.signal;
   };
 
   const start = Date.now();
@@ -754,7 +769,7 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress) {
     let response;
     try {
       response = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(taskId)}`, {
-        signal: AbortSignal.timeout(pollTimeoutMs),
+        signal: mergeSignals(signal, AbortSignal.timeout(pollTimeoutMs)),
       });
     } catch (err) {
       if (isAbortTimeout(err)) {
@@ -798,11 +813,25 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress) {
   throw new Error(`等待 MinerU 任务超时（taskId=${taskId}，lastStatus=${lastStatus || '-'}）${snippet ? `：${snippet}` : ''}`);
 }
 
-async function fetchMinerUResult(localEndpoint, taskId, timeoutMs) {
+async function fetchMinerUResult(localEndpoint, taskId, timeoutMs, signal = null) {
   const isAbortTimeout = (err) => {
     const name = err && typeof err === 'object' && 'name' in err ? String(err.name || '') : '';
     const msg = err instanceof Error ? err.message : String(err || '');
     return name === 'AbortError' || /aborted due to timeout/i.test(msg) || /operation was aborted/i.test(msg);
+  };
+  const mergeSignals = (a, b) => {
+    const list = [a, b].filter(Boolean);
+    if (list.length === 0) return null;
+    if (list.length === 1) return list[0];
+    const anyFn = AbortSignal && typeof AbortSignal.any === 'function' ? AbortSignal.any.bind(AbortSignal) : null;
+    if (anyFn) return anyFn(list);
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    for (const s of list) {
+      if (s.aborted) { controller.abort(); break; }
+      s.addEventListener('abort', onAbort, { once: true });
+    }
+    return controller.signal;
   };
 
   const resultTimeoutMs = Math.min(120_000, timeoutMs);
@@ -811,7 +840,7 @@ async function fetchMinerUResult(localEndpoint, taskId, timeoutMs) {
     let response;
     try {
       response = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(taskId)}/result`, {
-        signal: AbortSignal.timeout(resultTimeoutMs),
+        signal: mergeSignals(signal, AbortSignal.timeout(resultTimeoutMs)),
       });
     } catch (err) {
       if (isAbortTimeout(err)) {
@@ -1764,6 +1793,7 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
  */
 async function callAiProvider(provider, systemPrompt, userPrompt, opts = {}) {
   const enableThinking = opts.enableThinking ?? false;
+  const externalSignal = opts.signal || null;
   const trimmedKey = (provider.apiKey || '').trim();
   let trimmedEndpoint = (provider.apiEndpoint || '').trim();
   const trimmedModel = (provider.model || '').trim();
@@ -1793,6 +1823,14 @@ async function callAiProvider(provider, systemPrompt, userPrompt, opts = {}) {
 
   let aiResp;
   try {
+    const onAbort = () => {
+      try { aiController.abort(); } catch {}
+    };
+    if (externalSignal) {
+      if (externalSignal.aborted) onAbort();
+      else externalSignal.addEventListener('abort', onAbort, { once: true });
+    }
+
     aiResp = await fetch(aiFullUrl, {
       method: 'POST',
       headers: {
@@ -1920,6 +1958,7 @@ async function analyzeWithFallback(providers, systemPrompt, userPrompt, opts = {
   const maxRetries = opts.maxRetries ?? 2;
   const retryDelay = opts.retryDelay ?? 1000;
   const enableThinking = opts.enableThinking ?? false;
+  const signal = opts.signal || null;
   const errors = [];
 
   for (const provider of providers) {
@@ -1927,7 +1966,7 @@ async function analyzeWithFallback(providers, systemPrompt, userPrompt, opts = {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const result = await callAiProvider(provider, systemPrompt, userPrompt, { enableThinking });
+        const result = await callAiProvider(provider, systemPrompt, userPrompt, { enableThinking, signal });
         console.log(`[upload-server] AI provider ${provider.name} succeeded on attempt ${attempt}`);
         return { result, providerId: provider.id, providerName: provider.name };
       } catch (err) {
@@ -3048,6 +3087,16 @@ app.post('/batch/resume', (_req, res) => {
 // POST /batch/stop - 停止队列
 app.post('/batch/stop', (_req, res) => {
   res.json(stopQueue());
+});
+
+// POST /batch/cancel/:jobId - 取消指定任务（pending 直接标记取消；running 尝试 abort）
+app.post('/batch/cancel/:jobId', (req, res) => {
+  res.json(cancelJob(req.params.jobId));
+});
+
+// POST /batch/cancel-current - 取消当前运行任务
+app.post('/batch/cancel-current', (_req, res) => {
+  res.json(cancelCurrentJob());
 });
 
 // POST /batch/retry-failed - 重试所有失败任务

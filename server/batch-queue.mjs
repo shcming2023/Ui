@@ -75,6 +75,9 @@ const batchQueue = {
 let batchWorkerRunning = false;
 let batchPersistTimer = null;
 let dbBaseUrl = 'http://localhost:8789';
+let currentJobId = '';
+let currentAbortController = null;
+const cancelRequested = new Set();
 
 // ─── 外部依赖注入（由 upload-server 在初始化时提供）────────────
 let _deps = null;
@@ -235,6 +238,32 @@ function getCgroupMemoryBytes() {
   return null;
 }
 
+function mergeAbortSignals(signals) {
+  const list = (Array.isArray(signals) ? signals : []).filter(Boolean);
+  if (list.length === 0) return null;
+  if (list.length === 1) return list[0];
+
+  const anyFn = AbortSignal && typeof AbortSignal.any === 'function' ? AbortSignal.any.bind(AbortSignal) : null;
+  if (anyFn) return anyFn(list);
+
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  for (const s of list) {
+    if (s.aborted) {
+      controller.abort();
+      break;
+    }
+    s.addEventListener('abort', onAbort, { once: true });
+  }
+  return controller.signal;
+}
+
+function isAbortError(err) {
+  const name = err && typeof err === 'object' && 'name' in err ? String(err.name || '') : '';
+  const msg = err instanceof Error ? err.message : String(err || '');
+  return name === 'AbortError' || /aborted due to timeout/i.test(msg) || /operation was aborted/i.test(msg);
+}
+
 function checkMemoryPressure() {
   const cgroup = getCgroupMemoryBytes();
   const totalMem = cgroup?.limitBytes ?? os.totalmem();
@@ -317,12 +346,15 @@ async function processOneJob(job) {
   const deps = _deps;
   if (!deps) throw new Error('batch-queue not initialized');
 
-  const { mineruConfig, aiConfig } = await loadConfigs();
+  currentJobId = job.id;
+  currentAbortController = new AbortController();
+  try {
+    const { mineruConfig, aiConfig } = await loadConfigs();
 
-  // ── 阶段 1：检查文件是否已上传到 MinIO ──
-  if (!job.objectName) {
-    throw new Error('文件未上传到 MinIO（objectName 为空）。请通过前端上传文件后再提交到后端队列。');
-  }
+    // ── 阶段 1：检查文件是否已上传到 MinIO ──
+    if (!job.objectName) {
+      throw new Error('文件未上传到 MinIO（objectName 为空）。请通过前端上传文件后再提交到后端队列。');
+    }
 
   updateJob(job.id, { status: 'uploaded', progress: 30, message: '文件已在 MinIO 中' });
 
@@ -391,10 +423,12 @@ async function processOneJob(job) {
     fastApiForm.append('end_page_id', String(Math.max(0, Math.floor(maxPages) - 1)));
   }
 
+  const abortSignal = currentAbortController?.signal || null;
+  const mineruSubmitSignal = mergeAbortSignals([abortSignal, AbortSignal.timeout(timeoutMs)]);
   const fastApiResponse = await fetch(`${localEndpoint}/tasks`, {
     method: 'POST',
     body: fastApiForm,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: mineruSubmitSignal,
   });
 
   if (!fastApiResponse.ok) {
@@ -418,11 +452,11 @@ async function processOneJob(job) {
     if (status === 'processing') {
       updateJob(job.id, { progress: 60, message: 'MinerU 正在执行 OCR 与解析...' });
     }
-  });
+  }, abortSignal);
 
   // 提取结果
   updateJob(job.id, { progress: 70, message: '解析完成，提取结果...' });
-  const resultPayload = await deps.fetchMinerUResult(localEndpoint, mineruTaskId, timeoutMs);
+  const resultPayload = await deps.fetchMinerUResult(localEndpoint, mineruTaskId, timeoutMs, abortSignal);
   const markdown = deps.extractLocalMarkdown(resultPayload);
 
   if (!markdown) {
@@ -595,7 +629,7 @@ ${mdContext}
     providers,
     systemPrompt,
     userPrompt,
-    { maxRetries: 2, retryDelay: 1000, enableThinking },
+    { maxRetries: 2, retryDelay: 1000, enableThinking, signal: abortSignal },
   );
 
   const aiResult = {
@@ -637,6 +671,10 @@ ${mdContext}
       },
     });
   }
+  } finally {
+    if (currentJobId === job.id) currentJobId = '';
+    if (currentAbortController) currentAbortController = null;
+  }
 }
 
 // ─── Worker 循环 ──────────────────────────────────────────────
@@ -675,6 +713,27 @@ async function batchWorkerLoop() {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(`[batch-queue] Job ${job.id} (${job.fileName}) failed:`, message);
+
+      if (cancelRequested.has(job.id) || isAbortError(err)) {
+        cancelRequested.delete(job.id);
+        updateJob(job.id, {
+          status: 'skipped',
+          progress: 0,
+          message: '已取消',
+          error: '',
+        });
+        if (job.materialId) {
+          await syncMaterialToDb(job.materialId, {
+            status: 'pending',
+            metadata: {
+              processingStage: '',
+              processingMsg: '已取消',
+              processingUpdatedAt: new Date().toISOString(),
+            },
+          });
+        }
+        continue;
+      }
 
       job.retries = (job.retries || 0) + 1;
       if (job.retries < (job.maxRetries || BATCH_MAX_RETRIES)) {
@@ -837,6 +896,34 @@ export function stopQueue() {
   return { ok: true, message: '队列已停止' };
 }
 
+export function cancelJob(jobId) {
+  const job = batchQueue.items.find(j => j.id === jobId);
+  if (!job) return { ok: false, error: '任务不存在' };
+
+  if (['uploaded', 'mineru', 'ai'].includes(job.status)) {
+    cancelRequested.add(job.id);
+    updateJob(job.id, { message: '正在取消...' });
+    if (job.id === currentJobId && currentAbortController) {
+      try { currentAbortController.abort(); } catch {}
+      return { ok: true, cancelled: true };
+    }
+    return { ok: false, error: '当前任务不在本进程执行中，无法取消' };
+  }
+
+  if (job.status === 'pending') {
+    updateJob(job.id, { status: 'skipped', progress: 0, message: '已取消', error: '' });
+    persistBatchQueue();
+    return { ok: true, cancelled: true };
+  }
+
+  return { ok: false, error: '当前状态不支持取消' };
+}
+
+export function cancelCurrentJob() {
+  if (!currentJobId) return { ok: false, error: '当前无运行任务' };
+  return cancelJob(currentJobId);
+}
+
 /** 重试失败的任务 */
 export function retryFailed() {
   let count = 0;
@@ -876,6 +963,7 @@ export function removeJob(jobId) {
   if (idx === -1) return { ok: false, error: '任务不存在' };
   batchQueue.items.splice(idx, 1);
   batchQueue.updatedAt = Date.now();
+  persistBatchQueue();
   return { ok: true };
 }
 
