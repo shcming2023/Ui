@@ -5,7 +5,6 @@ import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import { StatusBadge } from '../components/StatusBadge';
 import type { ProcessTask } from '../../store/types';
-import { runMinerUPipeline } from '../../utils/mineruApi';
 
 // ─── 枚举选项定义 ──────────────────────────────────────────────
 
@@ -694,12 +693,14 @@ export function AssetDetailPage() {
   const [editingAiName, setEditingAiName] = useState(false);
   const [aiNameDraft, setAiNameDraft] = useState(detail?.title ?? '');
 
-  // MinerU 解析状态
-  const [mineruRunning, setMineruRunning] = useState(false);
-  const [mineruProgress, setMineruProgress] = useState(0);
-  const [mineruProgressMsg, setMineruProgressMsg] = useState('');
   const [mineruMarkdown, setMineruMarkdown] = useState<string>('');
-  const [mineruRetryCount, setMineruRetryCount] = useState(0);
+  const serverJob = state.serverBatchQueue?.items?.find(
+    (j) => j.materialId === numId && !['completed', 'error', 'skipped'].includes(j.status),
+  );
+  const mineruRunning = Boolean(serverJob);
+  const mineruProgress = serverJob?.progress ?? 0;
+  const mineruProgressMsg = serverJob?.message || (mineruRunning ? '后端队列处理中...' : '');
+  const mineruRetryCount = serverJob?.retries ?? 0;
 
   // AI 分析状态
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
@@ -931,70 +932,31 @@ export function AssetDetailPage() {
       return;
     }
 
-    const objectName = material.metadata?.objectName;
-    const fileUrl = material.metadata?.fileUrl;
-
-    if (!objectName && !fileUrl) {
-      toast.error('文件尚未上传或缺少访问地址');
-      return;
-    }
-
-    setMineruRunning(true);
-    setMineruProgress(0);
-    setMineruMarkdown('');
-    setMineruRetryCount(0);
-    dispatch({
-      type: 'UPDATE_MATERIAL',
-      payload: {
-        id: numId,
-        updates: {
-          mineruZipUrl: undefined,
-          metadata: {
-            ...material.metadata,
-            markdownObjectName: undefined,
-            markdownUrl: undefined,
-            parsedFilesCount: undefined,
-            parsedAt: undefined,
-          },
-        },
-      },
-    });
-    dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'processing' } });
-
     try {
-      const handleProgress = (pct: number, msg: string) => {
-        setMineruProgress(pct);
-        setMineruProgressMsg(msg);
-        const retryMatch = msg.match(/第\s*(\d+)\s*\/\s*\d+\s*次/);
-        if (retryMatch) setMineruRetryCount(Number(retryMatch[1]) - 1);
-      };
+      let objectName = String(material.metadata?.objectName || '').trim();
+      const fileUrl = String(material.metadata?.fileUrl || '').trim();
 
-      let result: Awaited<ReturnType<typeof runMinerUPipeline>>;
+      if (!objectName && !fileUrl) {
+        throw new Error('文件尚未上传或缺少访问地址');
+      }
 
-      if (objectName) {
-        // MinIO 存储：通过后端代理接口下载文件为 Blob，走模式 B（无需公网访问 MinIO）
-        setMineruProgressMsg('从存储下载文件...');
-        // 使用后端代理接口下载，避免浏览器直接访问 MinIO 内网地址（CORS/网络不通）
-        const proxyUrl = `/__proxy/upload/proxy-file?objectName=${encodeURIComponent(objectName)}`;
-        const blob = await fetch(proxyUrl).then((r) => {
+      if (!objectName && fileUrl) {
+        const blob = await fetch(fileUrl).then((r) => {
           if (!r.ok) throw new Error(`下载文件失败: HTTP ${r.status}`);
           return r.blob();
         });
-        const fileName = `${material.title}.${material.type.toLowerCase()}`;
-        const file = new File([blob], fileName, { type: blob.type || 'application/octet-stream' });
+        const name = material.metadata?.fileName || `${material.title}.${material.type.toLowerCase()}`;
+        const file = new File([blob], name, { type: blob.type || 'application/octet-stream' });
 
-        result = await runMinerUPipeline(file, state.mineruConfig, handleProgress, numId);
-      } else {
-        // tmpfiles 等公网可访问 URL：走模式 A（URL 直接提交）
-        if (!fileUrl) throw new Error('无法获取文件访问地址');
-        result = await runMinerUPipeline(fileUrl, `${material.title}.${material.type.toLowerCase()}`, state.mineruConfig, handleProgress, numId);
-      }
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('materialId', String(numId));
+        const uploadRes = await fetch('/__proxy/upload/upload', { method: 'POST', body: formData });
+        if (!uploadRes.ok) throw new Error(`上传失败: HTTP ${uploadRes.status}`);
+        const uploadResult = await uploadRes.json();
+        objectName = String(uploadResult?.objectName || '').trim();
+        if (!objectName) throw new Error('上传成功但未获得 objectName（未写入 MinIO）');
 
-      if (result.markdown) {
-        setMineruMarkdown(result.markdown);
-      }
-
-      if (result.markdownObjectName || result.markdownUrl) {
         dispatch({
           type: 'UPDATE_MATERIAL',
           payload: {
@@ -1002,65 +964,69 @@ export function AssetDetailPage() {
             updates: {
               metadata: {
                 ...material.metadata,
-                ...(result.markdownObjectName ? { markdownObjectName: result.markdownObjectName } : {}),
-                ...(result.markdownUrl ? { markdownUrl: result.markdownUrl } : {}),
-                ...(result.parsedFilesCount != null ? { parsedFilesCount: String(result.parsedFilesCount) } : {}),
-                parsedAt: new Date().toISOString(),
+                objectName,
+                fileUrl: uploadResult.url,
+                fileName: uploadResult.fileName,
+                provider: uploadResult.provider,
+                mimeType: uploadResult.mimeType,
               },
             },
           },
         });
       }
 
-      if (result.zipUrl) {
-        dispatch({ type: 'UPDATE_MATERIAL_MINERU_ZIP_URL', payload: { id: numId, mineruZipUrl: result.zipUrl } });
+      const fileName = material.metadata?.fileName || `${material.title}.${material.type.toLowerCase()}`;
+      const jobPath = String(material.metadata?.relativePath || fileName);
+      const jobs = [{
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        fileName,
+        fileSize: material.sizeBytes || 0,
+        path: jobPath,
+        objectName,
+        mimeType: material.metadata?.mimeType || 'application/octet-stream',
+        materialId: numId,
+      }];
 
-        setMineruProgressMsg('保存解析结果到文件库...');
-        try {
-          const downloadRes = await fetch('/__proxy/upload/parse/download', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ zipUrl: result.zipUrl, materialId: numId }),
-          });
-
-          if (downloadRes.ok) {
-            const downloadData = await downloadRes.json();
-            if (downloadData.markdownContent) setMineruMarkdown(downloadData.markdownContent);
-            if (downloadData.markdownObjectName || downloadData.markdownUrl) {
-              dispatch({
-                type: 'UPDATE_MATERIAL',
-                payload: {
-                  id: numId,
-                  updates: {
-                    metadata: {
-                      ...material.metadata,
-                      ...(downloadData.markdownObjectName ? { markdownObjectName: downloadData.markdownObjectName } : {}),
-                      ...(downloadData.markdownUrl ? { markdownUrl: downloadData.markdownUrl } : {}),
-                      parsedFilesCount: String(downloadData.totalFiles ?? '?'),
-                      parsedAt: new Date().toISOString(),
-                    },
-                  },
-                },
-              });
-              if (!downloadData.markdownContent && downloadData.markdownUrl) {
-                const mdRes = await fetch(downloadData.markdownUrl);
-                if (mdRes.ok) setMineruMarkdown(await mdRes.text());
-              }
-            }
-          }
-        } catch (downloadErr) {
-          console.warn('[MinerU] 解析物回存失败:', downloadErr);
-        }
+      const addRes = await fetch('/__proxy/upload/batch/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobs }),
+      });
+      if (!addRes.ok) {
+        const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
+        throw new Error((errData as { error?: string }).error || `HTTP ${addRes.status}`);
       }
 
-      dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'completed', mineruCompletedAt: Date.now() } });
-      toast.success('MinerU 解析完成！');
+      await fetch('/__proxy/upload/batch/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ autoMinerU: true, autoAI: true }),
+      }).catch(() => {});
+
+      dispatch({
+        type: 'UPDATE_MATERIAL',
+        payload: {
+          id: numId,
+          updates: {
+            status: 'processing',
+            mineruStatus: 'pending',
+            aiStatus: 'pending',
+            metadata: {
+              ...material.metadata,
+              processingStage: 'mineru',
+              processingMsg: '等待后端队列处理',
+              processingProgress: '0',
+              processingUpdatedAt: new Date().toISOString(),
+            },
+          },
+        },
+      });
+
+      toast.info('已加入后端解析队列');
     } catch (err) {
       const msg = err instanceof Error ? err.message : '未知错误';
       dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'failed' } });
       toast.error(`MinerU 解析失败: ${msg}`);
-    } finally {
-      setMineruRunning(false);
     }
   };
 

@@ -14,7 +14,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
-import { runMinerUPipeline } from '../../utils/mineruApi';
 import { checkLocalMinerUHealth } from '../../utils/mineruLocalApi';
 import type { BatchQueueItem, ServerBatchQueueState } from '../../store/types';
 
@@ -159,7 +158,7 @@ export function BatchProcessingController() {
   );
 
   const activeItem = useMemo(
-    () => items.find((i) => i.status === 'uploading' || i.status === 'mineru' || i.status === 'ai'),
+    () => items.find((i) => i.status === 'uploading'),
     [items],
   );
 
@@ -226,7 +225,6 @@ export function BatchProcessingController() {
 
     const processOne = async (item: BatchQueueItem, f: File) => {
       let materialId: number | undefined;
-      let stage: 'upload' | 'mineru' | 'ai' = 'upload';
       try {
         const uploadHealth = await fetchWithTimeout('/__proxy/upload/health', { timeoutMs: 5000 }).catch(() => null);
         if (!uploadHealth?.ok) throw new Error('上传服务不可用（/__proxy/upload/health）');
@@ -237,24 +235,6 @@ export function BatchProcessingController() {
         const newId = Date.now() * 1000 + idCounterRef.current;
         materialId = newId;
         updateItem(item.id, { materialId: newId });
-
-        const updateMaterialProgress = (stage: 'upload' | 'mineru' | 'ai' | '', msg: string, progress?: number) => {
-          dispatch({
-            type: 'UPDATE_MATERIAL',
-            payload: {
-              id: newId,
-              updates: {
-                metadata: {
-                  relativePath: item.path,
-                  processingStage: stage,
-                  processingMsg: msg,
-                  ...(progress != null ? { processingProgress: String(Math.round(progress)) } : {}),
-                  processingUpdatedAt: new Date().toISOString(),
-                },
-              },
-            },
-          });
-        };
 
         dispatch({
           type: 'ADD_MATERIAL',
@@ -297,260 +277,81 @@ export function BatchProcessingController() {
         }
 
         const uploadResult = await uploadRes.json();
-        updateItem(item.id, { progress: 30, message: '上传完成' });
-        updateMaterialProgress(autoMinerU ? 'mineru' : '', '上传完成', 30);
+        const objectName = String(uploadResult?.objectName || '').trim();
+        if (!objectName) {
+          throw new Error('上传成功但未获得 objectName（未写入 MinIO）。后端队列只能处理 MinIO 文件，请检查存储后端配置。');
+        }
 
         dispatch({
           type: 'UPDATE_MATERIAL',
           payload: {
             id: newId,
             updates: {
-              status: 'pending',
+              status: 'processing',
               uploadTime: '刚刚',
               metadata: {
                 relativePath: item.path,
                 fileUrl: uploadResult.url,
-                objectName: uploadResult.objectName || '',
+                objectName,
                 fileName: uploadResult.fileName,
                 provider: uploadResult.provider,
                 mimeType: uploadResult.mimeType,
                 ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
                 ...(uploadResult.format ? { format: uploadResult.format } : {}),
                 processingStage: autoMinerU ? 'mineru' : '',
-                processingMsg: '上传完成',
-                processingProgress: '30',
+                processingMsg: '等待后端队列处理',
+                processingProgress: '0',
                 processingUpdatedAt: new Date().toISOString(),
               },
             },
           },
         });
 
-        if (!autoMinerU) {
-          updateItem(item.id, { status: 'completed', progress: 100, message: '已完成（跳过 MinerU）' });
-          updateMaterialProgress('', '', 100);
-          batchRemoveFile(item.id);
-          return;
-        }
+        updateItem(item.id, { progress: 40, message: '提交后端队列...' });
 
-        stage = 'mineru';
-        if (state.mineruConfig.engine === 'local') {
-          const health = await checkLocalMinerUHealth(String(state.mineruConfig.localEndpoint || ''));
-          if (!health.ok) throw new Error(`本地 MinerU 不可用：${health.message}`);
-        } else {
-          if (!String(state.mineruConfig.apiKey || '').trim()) throw new Error('MinerU API Key 未配置');
-        }
+        const jobs = [{
+          id: item.id,
+          fileName: f.name,
+          fileSize: f.size,
+          path: item.path,
+          objectName,
+          mimeType: uploadResult.mimeType || f.type || 'application/octet-stream',
+          materialId: newId,
+        }];
 
-        updateItem(item.id, { status: 'mineru', progress: 40, message: '正在解析文件（MinerU）...' });
-        updateItem(item.id, { mineruStartedAt: Date.now() });
-        updateMaterialProgress('mineru', '正在解析文件（MinerU）...', 40);
-        dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: newId, mineruStatus: 'processing' } });
-
-        let mineruTaskId = '';
-        const onMinerUTaskId = (taskId: string) => {
-          mineruTaskId = taskId;
-          const msg = `MinerU 任务已提交（任务ID: ${taskId}）`;
-          updateItem(item.id, { message: msg });
-          updateMaterialProgress('mineru', msg, 40);
-          dispatch({
-            type: 'UPDATE_MATERIAL',
-            payload: {
-              id: newId,
-              updates: {
-                metadata: {
-                  mineruTaskId: taskId,
-                  processingStage: 'mineru',
-                  processingMsg: msg,
-                  processingUpdatedAt: new Date().toISOString(),
-                },
-              },
-            },
-          });
-        };
-
-        const onMinerUProgress = (progress: number, msg: string) => {
-          const normalized = normalizePctInput(progress);
-          const pct = 40 + (normalized / 100) * 30;
-          const displayMsg = mineruTaskId ? `${msg}（任务ID: ${mineruTaskId}）` : msg;
-          updateItem(item.id, { progress: pct, message: displayMsg });
-          updateMaterialProgress('mineru', displayMsg, pct);
-        };
-
-        let mineruResult: Awaited<ReturnType<typeof runMinerUPipeline>>;
-        try {
-          mineruResult = await runMinerUPipeline(f, state.mineruConfig, onMinerUProgress, newId, onMinerUTaskId);
-        } catch (e) {
-          const raw = e instanceof Error ? e.message : String(e);
-          const lower = raw.toLowerCase();
-          const isTimeout = raw.includes('请求超时') || raw.includes('signal timed out') || lower.includes('timeout');
-          const canFallbackToCloud =
-            state.mineruConfig.engine === 'local' &&
-            Boolean(String(state.mineruConfig.apiKey || '').trim());
-
-          if (isTimeout && canFallbackToCloud) {
-            toast.warning('本地 MinerU 超时，改用官方 API 重试…');
-            updateItem(item.id, { status: 'mineru', progress: 42, message: '本地超时，改用官方 API 重试…' });
-            mineruResult = await runMinerUPipeline(
-              f,
-              { ...state.mineruConfig, engine: 'cloud' },
-              onMinerUProgress,
-              newId,
-              onMinerUTaskId,
-            );
-          } else {
-            throw e;
-          }
-        }
-
-        let finalMarkdownContent = mineruResult.markdown || '';
-
-        if (mineruResult.zipUrl) {
-          dispatch({ type: 'UPDATE_MATERIAL_MINERU_ZIP_URL', payload: { id: newId, mineruZipUrl: mineruResult.zipUrl } });
-          try {
-            const downloadRes = await fetchWithTimeout('/__proxy/upload/parse/download', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ zipUrl: mineruResult.zipUrl, materialId: newId }),
-              timeoutMs: 60_000,
-            });
-            if (downloadRes.ok) {
-              const downloadData = await downloadRes.json();
-              if (downloadData.markdownObjectName || downloadData.markdownUrl) {
-                mineruResult.markdownObjectName = downloadData.markdownObjectName;
-                mineruResult.markdownUrl = downloadData.markdownUrl;
-                if (!downloadData.markdownContent && downloadData.markdownUrl) {
-                  const mdRes = await fetchWithTimeout(downloadData.markdownUrl, { timeoutMs: 60_000 });
-                  if (mdRes.ok) finalMarkdownContent = await mdRes.text();
-                } else if (downloadData.markdownContent) {
-                  finalMarkdownContent = downloadData.markdownContent;
-                }
-              }
-            }
-          } catch {
-          }
-        }
-
-        dispatch({
-          type: 'UPDATE_MATERIAL',
-          payload: {
-            id: newId,
-            updates: {
-              mineruStatus: 'completed',
-              metadata: {
-                relativePath: item.path,
-                markdownObjectName: mineruResult.markdownObjectName,
-                markdownUrl: mineruResult.markdownUrl,
-                processingStage: 'ai',
-                processingMsg: 'MinerU 解析完成',
-                processingProgress: '70',
-                processingUpdatedAt: new Date().toISOString(),
-              },
-            },
-          },
-        });
-        dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: newId, mineruStatus: 'completed', mineruCompletedAt: Date.now() } });
-        updateItem(item.id, { progress: 70, message: 'MinerU 解析完成' });
-        updateMaterialProgress('ai', 'MinerU 解析完成', 70);
-
-        if (!autoAI || (!mineruResult.markdownObjectName && !mineruResult.markdownUrl && !finalMarkdownContent)) {
-          updateItem(item.id, { status: 'completed', progress: 100, message: '已完成（跳过 AI）' });
-          updateMaterialProgress('', '', 100);
-          batchRemoveFile(item.id);
-          return;
-        }
-
-        stage = 'ai';
-        const { apiEndpoint, apiKey, model, providers } = state.aiConfig;
-        const enabledProviders = providers?.filter((p) => p.enabled);
-        if ((!enabledProviders || enabledProviders.length === 0) && (!apiEndpoint?.trim() || !model?.trim())) {
-          throw new Error('未配置 AI 服务（请在系统设置中至少启用一个 AI 提供商）');
-        }
-
-        updateItem(item.id, { status: 'ai', progress: 80, message: '正在进行 AI 分析...' });
-        updateMaterialProgress('ai', '正在进行 AI 分析...', 80);
-        dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: newId, aiStatus: 'analyzing' } });
-
-        const aiRes = await fetchWithTimeout('/__proxy/upload/parse/analyze', {
+        const addRes = await fetchWithTimeout('/__proxy/upload/batch/jobs', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            markdownObjectName: mineruResult.markdownObjectName,
-            markdownUrl: mineruResult.markdownUrl,
-            markdownContent: finalMarkdownContent || undefined,
-            materialId: newId,
-            // 新格式：传递 providers 数组
-            ...(enabledProviders && enabledProviders.length > 0
-              ? { aiProviders: enabledProviders }
-              : {
-                  // 旧格式兜底
-                  aiApiEndpoint: apiEndpoint?.replace(/\/$/, ''),
-                  aiApiKey: apiKey,
-                  aiModel: model,
-                }),
-            prompts: state.aiConfig.prompts,
-            enableThinking: state.aiConfig.enableThinking === true,
-          }),
-          timeoutMs: Math.max(60_000, (state.aiConfig.timeout || 300) * 1000 + 30_000),
+          body: JSON.stringify({ jobs }),
+          timeoutMs: 10_000,
         });
-
-        if (!aiRes.ok) {
-          const errData = await aiRes.json().catch(() => ({ error: `HTTP ${aiRes.status}` }));
-          const errorType = String((errData as { errorType?: string } | null)?.errorType || '');
-          if (aiRes.status === 429 || errorType === 'INSUFFICIENT_BALANCE' || errorType === 'RATE_LIMIT') {
-            dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: true } });
-            dispatch({ type: 'BATCH_SET_OPTIONS', payload: { autoAI: false } });
-          }
-          throw new Error((errData as { error?: string } | null)?.error || `HTTP ${aiRes.status}`);
+        if (!addRes.ok) {
+          const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
+          throw new Error((errData as { error?: string }).error || `HTTP ${addRes.status}`);
         }
 
-        const aiData = await aiRes.json();
-        dispatch({
-          type: 'UPDATE_MATERIAL_AI_STATUS',
-          payload: {
-            id: newId,
-            aiStatus: 'analyzed',
-            status: 'completed',
-            ...(aiData.title ? { title: aiData.title } : {}),
-            tags: aiData.tags?.length ? aiData.tags : [],
-            metadata: {
-              relativePath: item.path,
-              subject: aiData.subject || '',
-              grade: aiData.grade || '',
-              type: aiData.materialType || '',
-              language: aiData.language || '',
-              country: aiData.country || '',
-              summary: aiData.summary || '',
-              aiConfidence: String(aiData.confidence ?? ''),
-              aiAnalyzedAt: aiData.analyzedAt || new Date().toISOString(),
-              processingStage: '',
-              processingMsg: '',
-              processingProgress: '100',
-              processingUpdatedAt: new Date().toISOString(),
-            },
-          },
-        });
+        await fetchWithTimeout('/__proxy/upload/batch/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ autoMinerU, autoAI }),
+          timeoutMs: 10_000,
+        }).catch(() => {});
 
-        updateItem(item.id, { status: 'completed', progress: 100, message: '全部完成' });
-        updateMaterialProgress('', '', 100);
+        try {
+          const statusRes = await fetch('/__proxy/upload/batch/status', { signal: AbortSignal.timeout(5000) });
+          if (statusRes.ok) {
+            const data = await statusRes.json();
+            dispatch({ type: 'SERVER_BATCH_SYNC', payload: data });
+          }
+        } catch {}
+
+        updateItem(item.id, { status: 'completed', progress: 100, message: '已提交后端队列' });
         batchRemoveFile(item.id);
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
-        const stageLabel =
-          stage === 'upload' ? '上传阶段'
-          : stage === 'mineru' ? 'MinerU 阶段'
-          : 'AI 阶段';
-        const hint =
-          stage === 'upload'
-            ? '请确认 upload-server 正在运行，并可访问 /__proxy/upload/health'
-            : stage === 'mineru' && state.mineruConfig.engine === 'local'
-              ? '请检查本地 MinerU 地址（系统设置）与服务是否在线'
-              : stage === 'mineru'
-                ? '请检查 MinerU API Key 与网络连通性'
-                : '请检查 AI 配置与 upload-server /parse/analyze 日志';
-
         const msg = raw.includes('请求超时') || raw.includes('timed out') || raw.includes('Timeout')
-          ? `${stageLabel}${raw}。${hint}`
-          : `${stageLabel}失败：${raw}`;
-
+          ? `上传/提交超时：${raw}`
+          : `上传/提交失败：${raw}`;
         updateItem(item.id, { status: 'error', message: msg });
         if (materialId) {
           dispatch({
@@ -567,12 +368,6 @@ export function BatchProcessingController() {
               },
             },
           });
-          if (stage === 'ai') {
-            dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: materialId, aiStatus: 'failed' } });
-          } else {
-            dispatch({ type: 'UPDATE_MATERIAL_AI_STATUS', payload: { id: materialId, aiStatus: 'failed' } });
-            dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: materialId, mineruStatus: 'failed', mineruCompletedAt: Date.now() } });
-          }
         }
       }
     };
@@ -1028,8 +823,7 @@ export function BatchUploadModal() {
         </div>
 
         <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50">
-          {/* 后端批处理队列控制面板 */}
-          {serverQueue && serverQueue.total > 0 && (
+          {serverQueue && (
             <ServerBatchQueuePanel queue={serverQueue} />
           )}
           {items.length === 0 && (!serverQueue || serverQueue.total === 0) ? (
