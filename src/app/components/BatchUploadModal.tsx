@@ -397,20 +397,6 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
     }
   };
 
-  const handleStart = async () => {
-    try {
-      await fetch('/__proxy/upload/batch/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoMinerU: queue.autoMinerU, autoAI: queue.autoAI }),
-      });
-      toast.success('后端队列已启动');
-      await refresh();
-    } catch (e) {
-      toast.error(`启动失败: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
   const handlePause = async () => {
     try {
       await fetch('/__proxy/upload/batch/pause', { method: 'POST' });
@@ -428,16 +414,6 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
       await refresh();
     } catch (e) {
       toast.error(`恢复失败: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  };
-
-  const handleStop = async () => {
-    try {
-      await fetch('/__proxy/upload/batch/stop', { method: 'POST' });
-      toast.info('后端队列已停止');
-      await refresh();
-    } catch (e) {
-      toast.error(`停止失败: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
@@ -513,6 +489,8 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
   const hasProcessing = queue.items.some((j) => j.status === 'uploaded' || j.status === 'mineru' || j.status === 'ai');
   const unreadAlerts = queue.unreadAlerts ?? 0;
   const alerts = queue.alerts ?? [];
+  const pendingJobs = queue.items.filter((j) => j.status === 'pending');
+  const uploadingCount = queue.uploading ?? queue.items.filter((j) => j.status === 'uploading').length;
 
   return (
     <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
@@ -530,7 +508,7 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
             }`} />
           </h4>
           <p className="text-xs text-blue-700 mt-0.5">
-            总计 {queue.total} · 待处理 {queue.pending} · 处理中 {queue.processing} · 完成 {queue.completed} · 失败 {queue.errors}
+            总计 {queue.total} · 上传中 {uploadingCount} · 待处理 {queue.pending} · 处理中 {queue.processing} · 完成 {queue.completed} · 失败 {queue.errors}
             {queue.memory && (
               <span className={`ml-2 ${queue.memory.pressure ? 'text-red-600 font-semibold' : ''}`}>
                 · 内存 {queue.memory.freeMB}MB 空闲{queue.memory.pressure ? ' (压力过大，已暂停)' : ''}
@@ -539,24 +517,15 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {!queue.running ? (
-            <button onClick={handleStart} className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700">
-              <Play size={14} /> 启动
-            </button>
-          ) : isPaused ? (
+          {isPaused ? (
             <button onClick={handleResume} className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700">
               <Play size={14} /> 恢复
             </button>
-          ) : (
+          ) : queue.running ? (
             <button onClick={handlePause} className="flex items-center gap-1.5 px-3 py-1.5 bg-yellow-500 text-white text-sm rounded-lg hover:bg-yellow-600">
               <Pause size={14} /> 暂停
             </button>
-          )}
-          {queue.running && (
-            <button onClick={handleStop} className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
-              停止队列
-            </button>
-          )}
+          ) : null}
           {queue.running && hasProcessing && (
             <button onClick={handleCancelCurrent} className="px-3 py-1.5 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50">
               终止当前
@@ -616,8 +585,10 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
                     <span className="flex items-center gap-1 text-xs text-red-600"><AlertCircle size={12} /> 失败</span>
                   ) : job.status === 'skipped' ? (
                     <span className="text-xs text-gray-500">已取消</span>
+                  ) : job.status === 'uploading' ? (
+                    <span className="text-xs text-blue-600">上传中 {Math.max(0, Math.min(100, Math.round(job.progress || 0)))}%</span>
                   ) : job.status === 'pending' ? (
-                    <span className="text-xs text-gray-500">等待中</span>
+                    <span className="text-xs text-gray-500">排队第 {Math.max(1, pendingJobs.findIndex((j) => j.id === job.id) + 1)} 位</span>
                   ) : (
                     <span className="flex items-center gap-1 text-xs text-blue-600"><Loader size={12} className="animate-spin" /> {job.progress}%</span>
                   )}
@@ -640,7 +611,7 @@ export function ServerBatchQueuePanel({ queue }: { queue: ServerBatchQueueState 
                   {job.message}
                 </p>
               )}
-              {job.status !== 'completed' && job.status !== 'error' && job.status !== 'pending' && (
+              {job.status === 'uploading' && (
                 <div className="h-1.5 bg-blue-100 rounded-full overflow-hidden">
                   <div className="h-full bg-blue-500 transition-all duration-300" style={{ width: `${Math.max(0, Math.min(100, job.progress))}%` }} />
                 </div>

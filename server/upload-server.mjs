@@ -46,6 +46,7 @@ import {
   addJobs, startQueue, pauseQueue, resumeQueue, stopQueue,
   cancelJob, cancelCurrentJob,
   readAlerts,
+  patchJob,
   retryFailed, retryJob, removeJob, clearCompleted, clearAll,
   shutdown as shutdownBatchQueue,
 } from './batch-queue.mjs';
@@ -3123,6 +3124,11 @@ app.post('/batch/retry/:jobId', (req, res) => {
 // DELETE /batch/job/:jobId - 移除指定任务
 app.delete('/batch/job/:jobId', (req, res) => {
   res.json(removeJob(req.params.jobId));
+});
+
+// PATCH /batch/job/:jobId - 更新指定任务（用于 uploading → pending / error）
+app.patch('/batch/job/:jobId', (req, res) => {
+  res.json(patchJob(req.params.jobId, req.body || {}));
 });
 
 // POST /batch/alerts/read - 标记告警已读

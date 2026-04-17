@@ -57,6 +57,7 @@ export interface ServerBatchQueueState {
   autoMinerU: boolean;
   autoAI: boolean;
   total: number;
+  uploading?: number;
   pending: number;
   processing: number;
   completed: number;

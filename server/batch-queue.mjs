@@ -171,6 +171,7 @@ export async function restoreBatchQueue() {
     batchQueue.items = saved.items.map(j => {
       const mineruTaskId = String(j.mineruTaskId || '').trim();
       const status = String(j.status || '');
+      const objectName = String(j.objectName || '').trim();
       return {
         ...j,
         mineruTaskId,
@@ -179,9 +180,14 @@ export async function restoreBatchQueue() {
         status:
           status === 'mineru' && mineruTaskId
             ? 'mineru'
-            : ['uploading', 'ai'].includes(status)
-              ? 'pending'
+            : status === 'uploading'
+              ? (objectName ? 'pending' : 'error')
+              : status === 'ai'
+                ? 'pending'
               : status,
+        ...(status === 'uploading' && !objectName
+          ? { message: '上传已中断，请重新上传', error: 'uploading interrupted' }
+          : {}),
         retries: j.retries || 0,
         maxRetries: j.maxRetries || BATCH_MAX_RETRIES,
       };
@@ -213,8 +219,8 @@ export async function restoreBatchQueue() {
     const totalCount = batchQueue.items.length;
     console.log(`[batch-queue] Restored ${totalCount} jobs (${pendingCount} pending), running=${batchQueue.running}`);
 
-    // 如果恢复时队列是 running 状态，自动启动 worker
-    if (batchQueue.running && pendingCount > 0) {
+    // 自动启动 worker：恢复后存在 pending 任务且未暂停
+    if (!batchQueue.paused && pendingCount > 0) {
       console.log('[batch-queue] Auto-resuming worker after restart...');
       startBatchWorker();
     }
@@ -956,6 +962,7 @@ function startBatchWorker() {
 /** 获取队列状态（供 REST API 调用） */
 export function getQueueStatus() {
   const items = batchQueue.items;
+  const uploading = items.filter(j => j.status === 'uploading').length;
   const pending = items.filter(j => j.status === 'pending').length;
   const processing = items.filter(j => ['uploaded', 'mineru', 'ai'].includes(j.status)).length;
   const completed = items.filter(j => j.status === 'completed').length;
@@ -970,6 +977,7 @@ export function getQueueStatus() {
     autoMinerU: batchQueue.autoMinerU,
     autoAI: batchQueue.autoAI,
     total: items.length,
+    uploading,
     pending,
     processing,
     completed,
@@ -994,7 +1002,7 @@ export function getQueueStatus() {
 /** 添加任务到队列 */
 export function addJobs(jobs) {
   const now = Date.now();
-  const activeStatuses = new Set(['pending', 'uploaded', 'mineru', 'ai']);
+  const activeStatuses = new Set(['uploading', 'pending', 'uploaded', 'mineru', 'ai']);
   const addedIds = [];
   let addedCount = 0;
 
@@ -1011,6 +1019,7 @@ export function addJobs(jobs) {
       }
     }
 
+    const status = j.status === 'uploading' || j.status === 'pending' ? j.status : 'pending';
     const job = {
       id: j.id || `job-${now}-${Math.random().toString(36).slice(2, 8)}`,
       fileName: j.fileName,
@@ -1019,9 +1028,9 @@ export function addJobs(jobs) {
       objectName: j.objectName || '',
       mimeType: j.mimeType || 'application/pdf',
       materialId,
-      status: 'pending',
+      status,
       progress: 0,
-      message: '等待处理',
+      message: status === 'uploading' ? '待上传' : '等待处理',
       error: '',
       retries: 0,
       maxRetries: j.maxRetries || BATCH_MAX_RETRIES,
@@ -1041,8 +1050,38 @@ export function addJobs(jobs) {
 
   batchQueue.updatedAt = now;
   if (addedCount > 0) persistBatchQueue();
+  if (!batchQueue.paused && batchQueue.items.some((j) => j.status === 'pending')) {
+    startBatchWorker();
+  }
   console.log(`[batch-queue] Added ${addedCount} jobs, total: ${batchQueue.items.length}`);
   return addedIds;
+}
+
+export function patchJob(jobId, updates = {}) {
+  const job = batchQueue.items.find((j) => j.id === jobId);
+  if (!job) return { ok: false, error: '任务不存在' };
+
+  const next = {};
+  if (updates.status !== undefined) {
+    const s = String(updates.status || '');
+    if (!['uploading', 'pending', 'error'].includes(s)) return { ok: false, error: '不支持的 status' };
+    if (job.status === 'uploading' && !['uploading', 'pending', 'error'].includes(s)) return { ok: false, error: '非法状态迁移' };
+    next.status = s;
+  }
+  if (updates.progress !== undefined) next.progress = Math.max(0, Math.min(100, Number(updates.progress) || 0));
+  if (updates.message !== undefined) next.message = String(updates.message || '');
+  if (updates.error !== undefined) next.error = String(updates.error || '');
+  if (updates.objectName !== undefined) next.objectName = String(updates.objectName || '');
+  if (updates.mimeType !== undefined) next.mimeType = String(updates.mimeType || '');
+  if (updates.materialId !== undefined) next.materialId = Number(updates.materialId || 0);
+  if (updates.fileSize !== undefined) next.fileSize = Number(updates.fileSize || 0);
+  if (updates.path !== undefined) next.path = String(updates.path || '');
+
+  const prevStatus = job.status;
+  updateJob(jobId, next);
+  if (next.status && next.status !== prevStatus) persistBatchQueue();
+  if (!batchQueue.paused && (job.status === 'pending' || next.status === 'pending')) startBatchWorker();
+  return { ok: true };
 }
 
 /** 启动队列处理 */

@@ -85,7 +85,6 @@ export function SourceMaterialsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const uploadHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const serverQueueStartedRef = useRef(false);
   const lastServerQueueSyncAtRef = useRef(0);
 
   const [tab, setTab] = useState<TabFilter>('all');
@@ -150,6 +149,7 @@ export function SourceMaterialsPage() {
     autoMinerU: true,
     autoAI: true,
     total: 0,
+    uploading: 0,
     pending: 0,
     processing: 0,
     completed: 0,
@@ -258,7 +258,6 @@ export function SourceMaterialsPage() {
     e.target.value = '';
     if (validFiles.length === 0) return;
 
-    // 后端队列模式：先上传文件到 MinIO，然后提交到后端队列
     setBatchUploading(true);
     if (uploadHideTimerRef.current) {
       clearTimeout(uploadHideTimerRef.current);
@@ -267,19 +266,23 @@ export function SourceMaterialsPage() {
     setUploadProgress({ done: 0, total: validFiles.length, failed: 0 });
 
     let idCounter = 0;
-    const uploadOne = async (file: File) => {
+    const items = validFiles.map((file) => {
       const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
       idCounter = (idCounter + 1) % 1000;
       const materialId = Date.now() * 1000 + idCounter;
+      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      return { file, filePath, materialId, jobId };
+    });
 
+    for (const it of items) {
       dispatch({
         type: 'ADD_MATERIAL',
         payload: {
-          id: materialId,
-          title: file.name.replace(/\.[^.]+$/, ''),
-          type: file.name.split('.').pop()?.toUpperCase() ?? 'FILE',
-          size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
-          sizeBytes: file.size,
+          id: it.materialId,
+          title: it.file.name.replace(/\.[^.]+$/, ''),
+          type: it.file.name.split('.').pop()?.toUpperCase() ?? 'FILE',
+          size: `${(it.file.size / 1024 / 1024).toFixed(1)} MB`,
+          sizeBytes: it.file.size,
           uploadTime: '上传中...',
           uploadTimestamp: Date.now(),
           status: 'processing',
@@ -287,45 +290,114 @@ export function SourceMaterialsPage() {
           aiStatus: 'pending',
           tags: [],
           metadata: {
-            relativePath: filePath,
+            relativePath: it.filePath,
             processingStage: 'upload',
-            processingMsg: '正在上传文件...',
+            processingMsg: '待上传',
             processingProgress: '0',
             processingUpdatedAt: new Date().toISOString(),
           },
           uploader: '当前用户',
         },
       });
+    }
 
+    try {
+      const addRes = await fetch('/__proxy/upload/batch/jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          jobs: items.map((it) => ({
+            id: it.jobId,
+            fileName: it.file.name,
+            fileSize: it.file.size,
+            path: it.filePath,
+            mimeType: it.file.type || 'application/octet-stream',
+            materialId: it.materialId,
+            status: 'uploading',
+          })),
+        }),
+      });
+      if (!addRes.ok) {
+        const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
+        throw new Error((errData as { error?: string }).error || `HTTP ${addRes.status}`);
+      }
       try {
+        const statusRes = await fetch('/__proxy/upload/batch/status', { signal: AbortSignal.timeout(5000) });
+        if (statusRes.ok) {
+          const data = await statusRes.json();
+          dispatch({ type: 'SERVER_BATCH_SYNC', payload: data });
+        }
+      } catch {}
+    } catch (err) {
+      toast.error(`提交队列失败：${err instanceof Error ? err.message : String(err)}`);
+      setBatchUploading(false);
+      return;
+    }
+
+    const uploadWithProgress = (file: File, materialId: number, onProgress: (pct: number) => void) => {
+      return new Promise<any>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', '/__proxy/upload/upload');
+        xhr.responseType = 'json';
+        xhr.upload.onprogress = (evt) => {
+          if (!evt.lengthComputable) return;
+          const pct = Math.max(0, Math.min(100, Math.round((evt.loaded / Math.max(1, evt.total)) * 100)));
+          onProgress(pct);
+        };
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
+          else reject(new Error((xhr.response && xhr.response.error) || xhr.responseText || `HTTP ${xhr.status}`));
+        };
+        xhr.onerror = () => reject(new Error('网络错误'));
         const formData = new FormData();
         formData.append('file', file);
         formData.append('materialId', String(materialId));
+        xhr.send(formData);
+      });
+    };
 
-        const uploadRes = await fetch('/__proxy/upload/upload', {
-          method: 'POST',
-          body: formData,
+    const uploadOne = async (it: { file: File; filePath: string; materialId: number; jobId: string }) => {
+      let lastEmitAt = 0;
+      const emit = async (pct: number) => {
+        const now = Date.now();
+        if (now - lastEmitAt < 400 && pct !== 100) return;
+        lastEmitAt = now;
+        dispatch({
+          type: 'UPDATE_MATERIAL',
+          payload: {
+            id: it.materialId,
+            updates: {
+              metadata: {
+                relativePath: it.filePath,
+                processingStage: 'upload',
+                processingMsg: `上传中 ${pct}%`,
+                processingProgress: String(pct),
+                processingUpdatedAt: new Date().toISOString(),
+              },
+            },
+          },
         });
+        fetch(`/__proxy/upload/batch/job/${encodeURIComponent(it.jobId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'uploading', progress: pct, message: pct === 0 ? '待上传' : `上传中 ${pct}%` }),
+        }).catch(() => {});
+      };
 
-        if (!uploadRes.ok) {
-          const errText = await uploadRes.text();
-          throw new Error(errText || `HTTP ${uploadRes.status}`);
-        }
-
-        const uploadResult = await uploadRes.json();
+      try {
+        await emit(0);
+        const uploadResult = await uploadWithProgress(it.file, it.materialId, (pct) => { void emit(pct); });
         const objectName = String(uploadResult?.objectName || '').trim();
-        if (!objectName) {
-          throw new Error('上传成功但未获得 objectName（未写入 MinIO）');
-        }
+        if (!objectName) throw new Error('上传成功但未获得 objectName（未写入 MinIO）');
 
         dispatch({
           type: 'UPDATE_MATERIAL',
           payload: {
-            id: materialId,
+            id: it.materialId,
             updates: {
               uploadTime: '刚刚',
               metadata: {
-                relativePath: filePath,
+                relativePath: it.filePath,
                 fileUrl: uploadResult.url,
                 objectName,
                 fileName: uploadResult.fileName,
@@ -342,30 +414,21 @@ export function SourceMaterialsPage() {
           },
         });
 
-        const job = {
-          id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-          fileName: file.name,
-          fileSize: file.size,
-          path: filePath,
-          objectName,
-          mimeType: uploadResult.mimeType || file.type || 'application/pdf',
-          materialId,
-        };
-
-        const addRes = await fetch('/__proxy/upload/batch/jobs', {
-          method: 'POST',
+        await fetch(`/__proxy/upload/batch/job/${encodeURIComponent(it.jobId)}`, {
+          method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ jobs: [job] }),
-        });
-        if (!addRes.ok) {
-          const errData = await addRes.json().catch(() => ({ error: `HTTP ${addRes.status}` }));
-          throw new Error((errData as { error?: string }).error || `HTTP ${addRes.status}`);
-        }
-
-        if (!serverQueueStartedRef.current) {
-          serverQueueStartedRef.current = true;
-          await fetch('/__proxy/upload/batch/start', { method: 'POST' }).catch(() => {});
-        }
+          body: JSON.stringify({
+            status: 'pending',
+            objectName,
+            mimeType: uploadResult.mimeType || it.file.type || 'application/octet-stream',
+            materialId: it.materialId,
+            fileSize: it.file.size,
+            path: it.filePath,
+            progress: 0,
+            message: '等待处理',
+            error: '',
+          }),
+        }).catch(() => {});
 
         const now = Date.now();
         if (now - lastServerQueueSyncAtRef.current > 1000) {
@@ -383,7 +446,7 @@ export function SourceMaterialsPage() {
         dispatch({
           type: 'UPDATE_MATERIAL',
           payload: {
-            id: materialId,
+            id: it.materialId,
             updates: {
               status: 'failed',
               mineruStatus: 'failed',
@@ -397,6 +460,11 @@ export function SourceMaterialsPage() {
             },
           },
         });
+        fetch(`/__proxy/upload/batch/job/${encodeURIComponent(it.jobId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'error', error: msg, message: `上传失败：${msg}` }),
+        }).catch(() => {});
         setUploadProgress((prev) => (prev ? { ...prev, failed: prev.failed + 1 } : prev));
       } finally {
         setUploadProgress((prev) => {
@@ -415,9 +483,9 @@ export function SourceMaterialsPage() {
 
     const concurrency = 3;
     let idx = 0;
-    const runners = Array.from({ length: Math.min(concurrency, validFiles.length) }, async () => {
-      while (idx < validFiles.length) {
-        const current = validFiles[idx];
+    const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+      while (idx < items.length) {
+        const current = items[idx];
         idx += 1;
         await uploadOne(current);
       }
