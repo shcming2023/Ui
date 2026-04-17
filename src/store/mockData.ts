@@ -79,7 +79,7 @@ export const initialAiProviders: AiProvider[] = [
     enabled: true,
     apiEndpoint: 'http://host.docker.internal:11434/v1/chat/completions',
     apiKey: '',
-    model: 'qwen2.5:14b',
+    model: 'qwen3.5:9b',
     timeout: 600,
     priority: 1,
   },

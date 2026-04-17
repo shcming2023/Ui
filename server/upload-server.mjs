@@ -1727,6 +1727,8 @@ async function callAiProvider(provider, systemPrompt, userPrompt, opts = {}) {
         max_tokens: enableThinking ? 4096 : 2048,
         // Ollama 特有参数：控制 thinking mode（对非 Ollama 服务无影响）
         think: enableThinking,
+        // 显式禁用流式响应，防止 Ollama 返回 SSE 流导致 .json() 解析失败
+        stream: false,
       }),
       signal: aiController.signal,
     });
