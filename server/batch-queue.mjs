@@ -990,33 +990,55 @@ export function getQueueStatus() {
 /** 添加任务到队列 */
 export function addJobs(jobs) {
   const now = Date.now();
-  const newJobs = jobs.map(j => ({
-    id: j.id || `job-${now}-${Math.random().toString(36).slice(2, 8)}`,
-    fileName: j.fileName,
-    fileSize: j.fileSize || 0,
-    path: j.path || j.fileName,
-    objectName: j.objectName || '',
-    mimeType: j.mimeType || 'application/pdf',
-    materialId: j.materialId || 0,
-    status: 'pending',
-    progress: 0,
-    message: '等待处理',
-    error: '',
-    retries: 0,
-    maxRetries: j.maxRetries || BATCH_MAX_RETRIES,
-    lastRetryAt: 0,
-    markdownObjectName: '',
-    markdownUrl: '',
-    mineruTaskId: '',
-    mineruSubmittedAt: 0,
-    errorType: '',
-    createdAt: now,
-    updatedAt: now,
-  }));
-  batchQueue.items.push(...newJobs);
+  const activeStatuses = new Set(['pending', 'uploaded', 'mineru', 'ai']);
+  const addedIds = [];
+  let addedCount = 0;
+
+  for (const j of jobs) {
+    const materialId = j.materialId || 0;
+    if (materialId) {
+      const existing = batchQueue.items.find(
+        (item) => item.materialId === materialId && activeStatuses.has(item.status),
+      );
+      if (existing) {
+        console.log(`[batch-queue] Skip duplicate job for materialId=${materialId} (existing=${existing.id}, status=${existing.status})`);
+        addedIds.push(existing.id);
+        continue;
+      }
+    }
+
+    const job = {
+      id: j.id || `job-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      fileName: j.fileName,
+      fileSize: j.fileSize || 0,
+      path: j.path || j.fileName,
+      objectName: j.objectName || '',
+      mimeType: j.mimeType || 'application/pdf',
+      materialId,
+      status: 'pending',
+      progress: 0,
+      message: '等待处理',
+      error: '',
+      retries: 0,
+      maxRetries: j.maxRetries || BATCH_MAX_RETRIES,
+      lastRetryAt: 0,
+      markdownObjectName: '',
+      markdownUrl: '',
+      mineruTaskId: '',
+      mineruSubmittedAt: 0,
+      errorType: '',
+      createdAt: now,
+      updatedAt: now,
+    };
+    batchQueue.items.push(job);
+    addedIds.push(job.id);
+    addedCount++;
+  }
+
   batchQueue.updatedAt = now;
-  console.log(`[batch-queue] Added ${newJobs.length} jobs, total: ${batchQueue.items.length}`);
-  return newJobs.map(j => j.id);
+  if (addedCount > 0) persistBatchQueue();
+  console.log(`[batch-queue] Added ${addedCount} jobs, total: ${batchQueue.items.length}`);
+  return addedIds;
 }
 
 /** 启动队列处理 */
@@ -1128,7 +1150,15 @@ export function removeJob(jobId) {
 /** 清空已完成和失败的任务 */
 export function clearCompleted() {
   const before = batchQueue.items.length;
-  batchQueue.items = batchQueue.items.filter(j => j.status !== 'completed' && j.status !== 'error' && j.status !== 'skipped');
+  const removedIds = new Set(
+    batchQueue.items
+      .filter(j => j.status === 'completed' || j.status === 'error' || j.status === 'skipped')
+      .map(j => j.id),
+  );
+  batchQueue.items = batchQueue.items.filter(j => !removedIds.has(j.id));
+  if (Array.isArray(batchQueue.alerts) && removedIds.size > 0) {
+    batchQueue.alerts = batchQueue.alerts.filter((a) => !a?.jobId || !removedIds.has(String(a.jobId)));
+  }
   const removed = before - batchQueue.items.length;
   batchQueue.updatedAt = Date.now();
   if (removed > 0) persistBatchQueue();
@@ -1140,6 +1170,7 @@ export function clearAll() {
   batchQueue.running = false;
   batchQueue.paused = false;
   batchQueue.items = [];
+  batchQueue.alerts = [];
   batchQueue.updatedAt = Date.now();
   persistBatchQueue();
   return { ok: true };
