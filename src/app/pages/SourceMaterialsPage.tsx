@@ -163,31 +163,39 @@ export function SourceMaterialsPage() {
 
   useEffect(() => {
     let mounted = true;
-    fetch('/__proxy/upload/health', { signal: AbortSignal.timeout(5000) })
-      .then((r) => r.ok ? r.json().catch(() => ({})) : Promise.reject(new Error(`HTTP ${r.status}`)))
-      .then((data) => {
-        if (!mounted) return;
-        setUploadServerOk(Boolean((data as { ok?: boolean } | null)?.ok));
-      })
-      .catch(() => {
-        if (!mounted) return;
-        setUploadServerOk(false);
-      });
-    return () => { mounted = false; };
+    const check = () => {
+      fetch('/__proxy/upload/health', { signal: AbortSignal.timeout(5000) })
+        .then((r) => r.ok ? r.json().catch(() => ({})) : Promise.reject(new Error(`HTTP ${r.status}`)))
+        .then((data) => {
+          if (!mounted) return;
+          setUploadServerOk(Boolean((data as { ok?: boolean } | null)?.ok));
+        })
+        .catch(() => {
+          if (!mounted) return;
+          setUploadServerOk(false);
+        });
+    };
+    check();
+    const timer = setInterval(check, 30_000);
+    return () => { mounted = false; clearInterval(timer); };
   }, []);
 
   useEffect(() => {
     let mounted = true;
-    checkLocalMinerUHealth(String(state.mineruConfig.localEndpoint || ''))
-      .then((res) => {
-        if (!mounted) return;
-        setMineruOk(Boolean(res.ok));
-      })
-      .catch(() => {
-        if (!mounted) return;
-        setMineruOk(false);
-      });
-    return () => { mounted = false; };
+    const check = () => {
+      checkLocalMinerUHealth(String(state.mineruConfig.localEndpoint || ''))
+        .then((res) => {
+          if (!mounted) return;
+          setMineruOk(Boolean(res.ok));
+        })
+        .catch(() => {
+          if (!mounted) return;
+          setMineruOk(false);
+        });
+    };
+    check();
+    const timer = setInterval(check, 30_000);
+    return () => { mounted = false; clearInterval(timer); };
   }, [state.mineruConfig.localEndpoint]);
 
   const isCurrentPageFullySelected = currentItems.length > 0 && currentItems.every((item) => selectedIds.has(item.id));
