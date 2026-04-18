@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { Save, Eye, EyeOff, Bot, ScanLine, Database, CheckCircle, XCircle, Loader, Download, Upload, HardDrive, AlertTriangle, Plus, Trash2, ChevronUp, ChevronDown, ToggleLeft, ToggleRight, RefreshCw, Tag } from 'lucide-react';
 import { toast } from 'sonner';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useAppStore } from '../../store/appContext';
 import type { AiConfig, AiProvider, MinerUConfig, MinioConfig } from '../../store/types';
 import { checkLocalMinerUHealth } from '../../utils/mineruLocalApi';
@@ -175,6 +175,7 @@ function getUsageTextTone(ratio: number) {
 export function SettingsPage() {
   const { state, dispatch } = useAppStore();
   const location = useLocation();
+  const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<ActiveTab>('ai');
   const [showKey, setShowKey] = useState(false);
   const [showMinioKeys, setShowMinioKeys] = useState({ access: false, secret: false });
@@ -259,12 +260,23 @@ export function SettingsPage() {
   useEffect(() => {
     const tab = new URLSearchParams(location.search).get('tab');
     if (!tab) return;
-    if (tab === 'dictionary') setActiveTab('dictionary');
-    else if (tab === 'ai') setActiveTab('ai');
-    else if (tab === 'mineru') setActiveTab('mineru');
-    else if (tab === 'storage') setActiveTab('storage');
-    else if (tab === 'backup') setActiveTab('backup');
-  }, [location.search]);
+    const next =
+      tab === 'dictionary' ? 'dictionary'
+        : tab === 'ai' ? 'ai'
+          : tab === 'mineru' ? 'mineru'
+            : tab === 'storage' ? 'storage'
+              : tab === 'backup' ? 'backup'
+                : null;
+    if (!next) return;
+    if (next !== activeTab) setActiveTab(next);
+  }, [activeTab, location.search]);
+
+  const switchTab = (tab: ActiveTab) => {
+    setActiveTab(tab);
+    const next = new URLSearchParams(location.search);
+    next.set('tab', tab);
+    navigate({ pathname: location.pathname, search: `?${next.toString()}` }, { replace: true });
+  };
 
   useEffect(() => {
     if (activeTab !== 'backup') return;
@@ -735,7 +747,7 @@ export function SettingsPage() {
       {/* Tab */}
       <div className="flex border-b border-gray-200">
         <button
-          onClick={() => setActiveTab('ai')}
+          onClick={() => switchTab('ai')}
           className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'ai'
               ? 'border-blue-600 text-blue-600'
@@ -745,7 +757,7 @@ export function SettingsPage() {
           <span className="flex items-center gap-1.5"><Bot size={15} /> AI 识别配置</span>
         </button>
         <button
-          onClick={() => setActiveTab('mineru')}
+          onClick={() => switchTab('mineru')}
           className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'mineru'
               ? 'border-blue-600 text-blue-600'
@@ -755,7 +767,7 @@ export function SettingsPage() {
           <span className="flex items-center gap-1.5"><ScanLine size={15} /> MinerU 配置</span>
         </button>
         <button
-          onClick={() => setActiveTab('storage')}
+          onClick={() => switchTab('storage')}
           className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'storage'
               ? 'border-blue-600 text-blue-600'
@@ -765,7 +777,7 @@ export function SettingsPage() {
           <span className="flex items-center gap-1.5"><Database size={15} /> 存储配置</span>
         </button>
         <button
-          onClick={() => setActiveTab('backup')}
+          onClick={() => switchTab('backup')}
           className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'backup'
               ? 'border-blue-600 text-blue-600'
@@ -775,7 +787,7 @@ export function SettingsPage() {
           <span className="flex items-center gap-1.5"><HardDrive size={15} /> 备份与监控</span>
         </button>
         <button
-          onClick={() => setActiveTab('dictionary')}
+          onClick={() => switchTab('dictionary')}
           className={`px-5 py-2.5 text-sm font-medium border-b-2 transition-colors ${
             activeTab === 'dictionary'
               ? 'border-blue-600 text-blue-600'

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Pause, Play, RefreshCw, RotateCcw, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
@@ -12,6 +12,16 @@ function formatBytes(bytes: number) {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+ 
+function formatElapsed(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return '-';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}秒`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}分${s % 60}秒`;
+  const h = Math.floor(m / 60);
+  return `${h}小时${m % 60}分`;
 }
  
 function formatStage(status: BatchItemStatus) {
@@ -30,17 +40,32 @@ function isProcessingStatus(status: BatchItemStatus) {
   return status === 'uploaded' || status === 'mineru' || status === 'ai';
 }
  
+function isCancellable(status: BatchItemStatus) {
+  return status === 'uploading' || status === 'uploaded' || status === 'mineru' || status === 'ai';
+}
+ 
 export function WorkspacePage() {
   const { state, dispatch } = useAppStore();
   const queue = state.serverBatchQueue;
   const [filter, setFilter] = useState<FilterKey>('all');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [now, setNow] = useState(() => Date.now());
+  const pollTimerRef = useRef<number | null>(null);
+  const unmountedRef = useRef(false);
  
   const materialById = useMemo(() => {
     const map = new Map<number, Material>();
     for (const m of state.materials) map.set(m.id, m);
     return map;
   }, [state.materials]);
+ 
+  const hasActive = useMemo(() => {
+    if (!queue) return false;
+    const items = Array.isArray(queue.items) ? queue.items : [];
+    return items.some(
+      (j) => j.status === 'uploading' || j.status === 'pending' || isProcessingStatus(j.status),
+    );
+  }, [queue]);
  
   const jobs = useMemo(() => {
     const list = Array.isArray(queue?.items) ? queue.items : [];
@@ -57,16 +82,26 @@ export function WorkspacePage() {
     return list.filter((j) => j.status === 'pending').map((j) => j.id);
   }, [queue?.items]);
  
-  const refresh = async () => {
+  const counts = useMemo(() => {
+    const all = Array.isArray(queue?.items) ? queue.items : [];
+    const pending = all.filter((j) => j.status === 'pending' || j.status === 'uploading').length;
+    const processing = all.filter((j) => isProcessingStatus(j.status)).length;
+    const failed = all.filter((j) => j.status === 'error').length;
+    const completed = all.filter((j) => j.status === 'completed').length;
+    return { all: all.length, pending, processing, failed, completed };
+  }, [queue?.items]);
+ 
+  const refresh = useCallback(async (opts: { silent?: boolean } = {}) => {
+    const silent = opts.silent !== false;
     try {
       const res = await fetch('/__proxy/upload/batch/status', { signal: AbortSignal.timeout(5000) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       dispatch({ type: 'SERVER_BATCH_SYNC', payload: data });
     } catch (e) {
-      toast.error(`刷新失败：${e instanceof Error ? e.message : String(e)}`);
+      if (!silent) toast.error(`刷新失败：${e instanceof Error ? e.message : String(e)}`);
     }
-  };
+  }, [dispatch]);
  
   const openUpload = () => {
     dispatch({ type: 'BATCH_SET_UI_OPEN', payload: { uiOpen: true } });
@@ -118,7 +153,7 @@ export function WorkspacePage() {
       const tasks = ids.map(async (id) => {
         const job = byId.get(id);
         if (!job) return;
-        if (isProcessingStatus(job.status)) {
+        if (isCancellable(job.status)) {
           await fetch(`/__proxy/upload/batch/cancel/${encodeURIComponent(id)}`, { method: 'POST' });
           return;
         }
@@ -178,6 +213,56 @@ export function WorkspacePage() {
     return `队列 ${queue.total} · 上传中 ${uploading} · 待处理 ${queue.pending} · 处理中 ${queue.processing} · 失败 ${queue.errors} · 完成 ${queue.completed}`;
   }, [queue]);
  
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, []);
+ 
+  useEffect(() => {
+    if (!hasActive) return;
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, [hasActive]);
+ 
+  useEffect(() => {
+    const scheduleNext = (delayMs: number) => {
+      if (unmountedRef.current) return;
+      if (pollTimerRef.current !== null) window.clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = window.setTimeout(() => {
+        void poll();
+      }, delayMs);
+    };
+ 
+    const poll = async () => {
+      if (unmountedRef.current) return;
+      if (document.hidden) {
+        scheduleNext(30_000);
+        return;
+      }
+      await refresh({ silent: true });
+      scheduleNext(hasActive ? 5_000 : 30_000);
+    };
+ 
+    scheduleNext(0);
+    const onVisibilityChange = () => {
+      if (!document.hidden) scheduleNext(0);
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      if (pollTimerRef.current !== null) {
+        window.clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [hasActive, refresh]);
+ 
   return (
     <div className="p-6 space-y-5 max-w-[1400px] mx-auto">
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -215,7 +300,7 @@ export function WorkspacePage() {
             <RotateCcw size={16} /> 重试失败
           </button>
           <button
-            onClick={refresh}
+            onClick={() => refresh({ silent: false })}
             className="flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg border border-gray-200 bg-white hover:bg-gray-50"
           >
             <RefreshCw size={16} /> 刷新
@@ -239,7 +324,20 @@ export function WorkspacePage() {
                 filter === t.key ? 'bg-blue-50 text-blue-700 border-blue-200' : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50'
               }`}
             >
-              {t.label}
+              <span className="inline-flex items-center gap-2">
+                <span>{t.label}</span>
+                <span className="text-[11px] px-2 h-5 leading-5 rounded-full bg-gray-100 text-gray-600 border border-gray-200">
+                  {t.key === 'all'
+                    ? counts.all
+                    : t.key === 'pending'
+                      ? counts.pending
+                      : t.key === 'processing'
+                        ? counts.processing
+                        : t.key === 'failed'
+                          ? counts.failed
+                          : counts.completed}
+                </span>
+              </span>
             </button>
           ))}
         </div>
@@ -295,6 +393,10 @@ export function WorkspacePage() {
               const canMove = job.status === 'pending' && pendingIds.length > 1;
               const canMoveUp = canMove && pendingIds[0] !== job.id;
               const canMoveDown = canMove && pendingIds[pendingIds.length - 1] !== job.id;
+              const progress = Math.max(0, Math.min(100, Math.round(Number(job.progress || 0))));
+              const lastUpdated = job.updatedAt || 0;
+              const elapsedFrom = job.status === 'mineru' && job.mineruSubmittedAt ? job.mineruSubmittedAt : job.createdAt || lastUpdated || 0;
+              const showTiming = isCancellable(job.status);
               return (
                 <tr key={job.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-4 py-3">
@@ -323,42 +425,55 @@ export function WorkspacePage() {
                   <td className="px-4 py-3 text-gray-600">{uploader}</td>
                   <td className="px-4 py-3 text-gray-600">{uploadTs ? new Date(uploadTs).toLocaleString() : '-'}</td>
                   <td className="px-4 py-3">
-                    <span className={`text-xs px-2 py-1 rounded-full border ${
-                      job.status === 'completed'
-                        ? 'bg-green-50 text-green-700 border-green-200'
-                        : job.status === 'error'
-                          ? 'bg-red-50 text-red-700 border-red-200'
-                          : isProcessingStatus(job.status)
-                            ? 'bg-blue-50 text-blue-700 border-blue-200'
-                            : 'bg-gray-50 text-gray-700 border-gray-200'
-                    }`}>
-                      {formatStage(job.status)}
-                    </span>
+                    <div className="flex flex-col gap-1">
+                      <span className={`text-xs px-2 py-1 rounded-full border w-fit ${
+                        job.status === 'completed'
+                          ? 'bg-green-50 text-green-700 border-green-200'
+                          : job.status === 'error'
+                            ? 'bg-red-50 text-red-700 border-red-200'
+                            : isProcessingStatus(job.status)
+                              ? 'bg-blue-50 text-blue-700 border-blue-200'
+                              : 'bg-gray-50 text-gray-700 border-gray-200'
+                      }`}>
+                        {formatStage(job.status)}
+                      </span>
+                      {showTiming && (
+                        <div className="text-[11px] text-gray-500">
+                          <span>进度 {progress}%</span>
+                          {elapsedFrom > 0 && <span className="ml-2">已等待 {formatElapsed(now - elapsedFrom)}</span>}
+                          {lastUpdated > 0 && <span className="ml-2">最近更新 {formatElapsed(now - lastUpdated)}</span>}
+                        </div>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-1.5">
-                      <button
-                        onClick={() => reorderPendingBySwap(job.id, 'up')}
-                        disabled={!canMoveUp}
-                        className="p-2 rounded border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50"
-                        title="上移（仅 pending）"
-                        type="button"
-                      >
-                        <ArrowUp size={14} />
-                      </button>
-                      <button
-                        onClick={() => reorderPendingBySwap(job.id, 'down')}
-                        disabled={!canMoveDown}
-                        className="p-2 rounded border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50"
-                        title="下移（仅 pending）"
-                        type="button"
-                      >
-                        <ArrowDown size={14} />
-                      </button>
+                      {job.status === 'pending' && pendingIds.length > 1 && (
+                        <>
+                          <button
+                            onClick={() => reorderPendingBySwap(job.id, 'up')}
+                            disabled={!canMoveUp}
+                            className="p-2 rounded border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50"
+                            title="上移（仅 pending）"
+                            type="button"
+                          >
+                            <ArrowUp size={14} />
+                          </button>
+                          <button
+                            onClick={() => reorderPendingBySwap(job.id, 'down')}
+                            disabled={!canMoveDown}
+                            className="p-2 rounded border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-50"
+                            title="下移（仅 pending）"
+                            type="button"
+                          >
+                            <ArrowDown size={14} />
+                          </button>
+                        </>
+                      )}
                       <button
                         onClick={async () => {
                           try {
-                            if (isProcessingStatus(job.status)) {
+                            if (isCancellable(job.status)) {
                               await fetch(`/__proxy/upload/batch/cancel/${encodeURIComponent(job.id)}`, { method: 'POST' });
                             } else {
                               await fetch(`/__proxy/upload/batch/job/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
@@ -369,7 +484,7 @@ export function WorkspacePage() {
                           }
                         }}
                         className="p-2 rounded border border-red-200 bg-white text-red-600 hover:bg-red-50"
-                        title={isProcessingStatus(job.status) ? '取消' : '删除'}
+                        title={isCancellable(job.status) ? '取消' : '删除'}
                         type="button"
                       >
                         <Trash2 size={14} />
@@ -385,4 +500,3 @@ export function WorkspacePage() {
     </div>
   );
 }
-
