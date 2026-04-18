@@ -59,10 +59,12 @@ export function useFileUpload() {
     setProgress({ done: 0, total: validFiles.length, failed: 0 });
  
     let idCounter = 0;
+    const baseTs = Date.now();
     const items = validFiles.map((file) => {
       const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-      idCounter = (idCounter + 1) % 1000;
-      const materialId = Date.now() * 1000 + idCounter;
+      idCounter += 1;
+      const ts = baseTs + Math.floor(idCounter / 1000);
+      const materialId = ts * 1000 + (idCounter % 1000);
       const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       return { file, filePath, materialId, jobId };
     });
@@ -269,4 +271,3 @@ export function useFileUpload() {
  
   return { upload, uploading, progress };
 }
-

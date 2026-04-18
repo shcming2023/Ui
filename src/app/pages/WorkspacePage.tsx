@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDown, ArrowUp, ChevronDown, Eye, FolderPlus, Pause, Play, RotateCcw, Settings, Trash2, Upload } from 'lucide-react';
+import { ArrowDown, ArrowUp, ChevronDown, Eye, FolderPlus, Settings, Trash2, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import type { BatchItemStatus, Material } from '../../store/types';
@@ -157,6 +157,18 @@ export function WorkspacePage() {
       toast.error(`重试失败：${e instanceof Error ? e.message : String(e)}`);
     }
   };
+ 
+  const clearFinished = useCallback(async () => {
+    try {
+      const res = await fetch('/__proxy/upload/batch/clear-completed', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
+      toast.success(`已清理 ${(data as { removed?: number }).removed || 0} 个任务`);
+      await refresh();
+    } catch (e) {
+      toast.error(`清理失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [refresh]);
  
   const clearSelection = () => setSelectedIds(new Set());
  
@@ -371,17 +383,7 @@ export function WorkspacePage() {
               {
                 kind: 'item',
                 label: `清理已结束 (${(queue?.errors ?? 0) + (queue?.completed ?? 0)})`,
-                onClick: async () => {
-                  try {
-                    const res = await fetch('/__proxy/upload/batch/clear-completed', { method: 'POST' });
-                    const data = await res.json().catch(() => ({}));
-                    if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
-                    toast.success(`已清理 ${(data as { removed?: number }).removed || 0} 个任务`);
-                    await refresh();
-                  } catch (e) {
-                    toast.error(`清理失败：${e instanceof Error ? e.message : String(e)}`);
-                  }
-                },
+                onClick: clearFinished,
                 disabled: !queue || (queue?.completed ?? 0) + (queue?.errors ?? 0) === 0,
               },
               {
@@ -443,17 +445,7 @@ export function WorkspacePage() {
           {(counts.failed > 0 || counts.completed > 0) && (
             <button
               type="button"
-              onClick={async () => {
-                try {
-                  const res = await fetch('/__proxy/upload/batch/clear-completed', { method: 'POST' });
-                  const data = await res.json().catch(() => ({}));
-                  if (!res.ok) throw new Error((data as { error?: string }).error || `HTTP ${res.status}`);
-                  toast.success(`已清理 ${(data as { removed?: number }).removed || 0} 个任务`);
-                  await refresh();
-                } catch (e) {
-                  toast.error(`清理失败：${e instanceof Error ? e.message : String(e)}`);
-                }
-              }}
+              onClick={clearFinished}
               className="text-xs text-gray-500 hover:text-red-500"
             >
               清理已结束 ({counts.failed + counts.completed})

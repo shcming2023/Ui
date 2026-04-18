@@ -26,8 +26,15 @@ export function DropdownMenu({
       if (e.target instanceof Node && el.contains(e.target)) return;
       setOpen(false);
     };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
     window.addEventListener('mousedown', onDown);
-    return () => window.removeEventListener('mousedown', onDown);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('mousedown', onDown);
+    };
   }, [open]);
  
   return (
@@ -62,4 +69,3 @@ export function DropdownMenu({
     </div>
   );
 }
-
