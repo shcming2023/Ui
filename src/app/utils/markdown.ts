@@ -1,7 +1,17 @@
 export function renderMarkdown(md: string): string {
-  let html = md
+  const escapeHtml = (s: string) =>
+    s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+ 
+  const safe = escapeHtml(md);
+ 
+  let html = safe
     .replace(/```[\w]*\n?([\s\S]*?)```/g, (_, code) =>
-      `<pre class="bg-gray-100 rounded p-3 text-xs overflow-auto my-2 font-mono whitespace-pre-wrap"><code>${String(code).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</code></pre>`)
+      `<pre class="bg-gray-100 rounded p-3 text-xs overflow-auto my-2 font-mono whitespace-pre-wrap"><code>${String(code)}</code></pre>`)
     .replace(/`([^`]+)`/g, '<code class="bg-gray-100 rounded px-1 py-0.5 text-xs font-mono text-red-600">$1</code>')
     .replace(/^### (.+)$/gm, '<h3 class="text-sm font-bold text-gray-800 mt-4 mb-1">$1</h3>')
     .replace(/^## (.+)$/gm, '<h2 class="text-base font-bold text-gray-800 mt-5 mb-2 border-b border-gray-200 pb-1">$1</h2>')
@@ -24,4 +34,3 @@ export function renderMarkdown(md: string): string {
     .replace(/\n/g, '<br />');
   return `<p class="text-xs text-gray-700 leading-relaxed">${html}</p>`;
 }
-

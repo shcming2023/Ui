@@ -19,6 +19,7 @@ export function JsonPreviewPanel({ materialId }: { materialId: number }) {
  
   useEffect(() => {
     let cancelled = false;
+    const ac = new AbortController();
     setLoading(true);
     setError('');
     setContent('');
@@ -26,7 +27,7 @@ export function JsonPreviewPanel({ materialId }: { materialId: number }) {
     (async () => {
       try {
         const prefix = `parsed/${materialId}/`;
-        const listRes = await fetch(`/__proxy/upload/list?prefix=${encodeURIComponent(prefix)}`, { cache: 'no-store' });
+        const listRes = await fetch(`/__proxy/upload/list?prefix=${encodeURIComponent(prefix)}`, { cache: 'no-store', signal: ac.signal });
         if (!listRes.ok) throw new Error(`HTTP ${listRes.status}`);
         const listData = await listRes.json();
         const objects: ListedObject[] = Array.isArray(listData?.objects) ? listData.objects : [];
@@ -35,7 +36,7 @@ export function JsonPreviewPanel({ materialId }: { materialId: number }) {
           setContent('暂无 JSON 产物');
           return;
         }
-        const r = await fetch(jsonFile.presignedUrl, { cache: 'no-store' });
+        const r = await fetch(jsonFile.presignedUrl, { cache: 'no-store', signal: ac.signal });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const text = await r.text();
         try {
@@ -44,6 +45,7 @@ export function JsonPreviewPanel({ materialId }: { materialId: number }) {
           setContent(text);
         }
       } catch (e) {
+        if (e instanceof DOMException && e.name === 'AbortError') return;
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       } finally {
         if (!cancelled) setLoading(false);
@@ -52,6 +54,7 @@ export function JsonPreviewPanel({ materialId }: { materialId: number }) {
  
     return () => {
       cancelled = true;
+      ac.abort();
     };
   }, [materialId]);
  

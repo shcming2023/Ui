@@ -78,7 +78,7 @@ export function MetadataTab({
       fileName: material?.metadata?.fileName || material?.title || '—',
       format: material?.metadata?.format || material?.type || '—',
       size: material?.size || '—',
-      pages: material?.metadata?.pages || '—',
+      pages: String(material?.metadata?.pages ?? '—'),
       provider: material?.metadata?.provider === 'minio' ? 'MinIO' : material?.metadata?.provider || '—',
     };
   }, [material]);
@@ -89,7 +89,6 @@ export function MetadataTab({
   }, [state.aiConfig?.providers]);
  
   const handleSaveTags = () => {
-    dispatch({ type: 'UPDATE_ASSET_TAGS', payload: { id: materialId, tags: localTags } });
     dispatch({ type: 'UPDATE_MATERIAL_TAGS', payload: { id: materialId, tags: localTags } });
     setEditingTags(false);
     toast.success('标签已保存');
@@ -115,7 +114,7 @@ export function MetadataTab({
           <dt className="text-gray-400">大小</dt>
           <dd className="text-gray-700">{fileInfo.size}</dd>
           <dt className="text-gray-400">页数</dt>
-          <dd className="text-gray-700">{fileInfo.pages as any}</dd>
+          <dd className="text-gray-700">{fileInfo.pages}</dd>
           <dt className="text-gray-400">存储后端</dt>
           <dd className="text-gray-700">{fileInfo.provider}</dd>
         </dl>
@@ -227,4 +226,3 @@ export function MetadataTab({
     </div>
   );
 }
-
