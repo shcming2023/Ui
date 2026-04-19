@@ -51,11 +51,7 @@ const ACTIVE_STATUSES = new Set([
   'error',      // 失败（占位，等待用户重试或清理）
 ]);
 
-// 不计入上限的状态（已终态）：
-const INACTIVE_STATUSES = new Set([
-  'completed',  // 完成
-  'skipped',    // 已取消
-]);
+// 不计入上限的状态（已终态）：'completed', 'skipped'
 
 // ─── 队列状态 ─────────────────────────────────────────────────
 const batchQueue = {
@@ -305,7 +301,7 @@ export async function recoverOrphanMaterials() {
         mineruStatus === 'pending' ||
         mineruStatus === 'parsing' ||
         aiStatus === 'analyzing' ||
-        status === 'processing';
+        status === 'mineru';
 
       // 只有最近 24h 内入过队的才算是真正的"中断孤儿"
       const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -358,7 +354,7 @@ export async function recoverOrphanMaterials() {
     }
 
     orphanJobs.sort((a, b) => (a.uploadTimestamp || 0) - (b.uploadTimestamp || 0));
-    addJobs(orphanJobs);
+    addJobs(orphanJobs, { skipCapacityCheck: true });
 
     const reuseCount = orphanJobs.filter(j => j.mineruTaskId).length;
     const resubmitCount = orphanJobs.length - reuseCount;
@@ -936,9 +932,9 @@ async function processOneJob(job) {
       actualStatus = 'queued';
     }
 
-    // 若任务在队列中等待，保持 pending 状态；若已开始处理，才更新为 processing
+    // 若任务在队列中等待，保持 mineru 状态；若已开始处理，更新消息但不改变状态
     if (actualStatus === 'processing' || actualStatus === 'parsing') {
-      updateJob(job.id, { progress: 50, message: `MinerU 任务 ${mineruTaskId} 处理中...`, status: 'processing' });
+      updateJob(job.id, { progress: 50, message: `MinerU 任务 ${mineruTaskId} 处理中...` });
     } else {
       updateJob(job.id, { progress: 40, message: `MinerU 任务 ${mineruTaskId} 已提交，排队中...` });
     }
@@ -1492,7 +1488,9 @@ export function getQueueStatus() {
 }
 
 /** 添加任务到队列 */
-export function addJobs(jobs) {
+export function addJobs(jobs, options = {}) {
+  const { skipCapacityCheck = false } = options;
+
   // 规则 1：单次提交数量限制
   if (!Array.isArray(jobs) || jobs.length === 0) {
     return {
@@ -1502,40 +1500,43 @@ export function addJobs(jobs) {
     };
   }
 
-  if (jobs.length > QUEUE_MAX_BATCH) {
-    return {
-      ok: false,
-      error: `单次最多提交 ${QUEUE_MAX_BATCH} 个文件，当前提交 ${jobs.length} 个`,
-      code: 'BATCH_LIMIT_EXCEEDED',
-      limit: QUEUE_MAX_BATCH,
-      submitted: jobs.length,
-    };
-  }
+  // 只有在非旁路模式下才执行容量校验（孤儿恢复场景需要跳过）
+  if (!skipCapacityCheck) {
+    if (jobs.length > QUEUE_MAX_BATCH) {
+      return {
+        ok: false,
+        error: `单次最多提交 ${QUEUE_MAX_BATCH} 个文件，当前提交 ${jobs.length} 个`,
+        code: 'BATCH_LIMIT_EXCEEDED',
+        limit: QUEUE_MAX_BATCH,
+        submitted: jobs.length,
+      };
+    }
 
-  // 规则 2：队列总容量限制
-  const activeCount = batchQueue.items.filter(j => ACTIVE_STATUSES.has(j.status)).length;
-  const available = QUEUE_MAX_ACTIVE - activeCount;
+    // 规则 2：队列总容量限制
+    const activeCount = batchQueue.items.filter(j => ACTIVE_STATUSES.has(j.status)).length;
+    const available = QUEUE_MAX_ACTIVE - activeCount;
 
-  if (available <= 0) {
-    return {
-      ok: false,
-      error: `队列已满（${activeCount}/${QUEUE_MAX_ACTIVE}），请等待当前任务完成或清理失败任务后再提交`,
-      code: 'QUEUE_FULL',
-      activeCount,
-      limit: QUEUE_MAX_ACTIVE,
-    };
-  }
+    if (available <= 0) {
+      return {
+        ok: false,
+        error: `队列已满（${activeCount}/${QUEUE_MAX_ACTIVE}），请等待当前任务完成或清理失败任务后再提交`,
+        code: 'QUEUE_FULL',
+        activeCount,
+        limit: QUEUE_MAX_ACTIVE,
+      };
+    }
 
-  if (jobs.length > available) {
-    return {
-      ok: false,
-      error: `队列剩余容量 ${available} 个，当前提交 ${jobs.length} 个，超出 ${jobs.length - available} 个`,
-      code: 'QUEUE_CAPACITY_EXCEEDED',
-      activeCount,
-      available,
-      submitted: jobs.length,
-      limit: QUEUE_MAX_ACTIVE,
-    };
+    if (jobs.length > available) {
+      return {
+        ok: false,
+        error: `队列剩余容量 ${available} 个，当前提交 ${jobs.length} 个，超出 ${jobs.length - available} 个`,
+        code: 'QUEUE_CAPACITY_EXCEEDED',
+        activeCount,
+        available,
+        submitted: jobs.length,
+        limit: QUEUE_MAX_ACTIVE,
+      };
+    }
   }
 
   // 通过校验，正常入队
@@ -1597,12 +1598,15 @@ export function addJobs(jobs) {
     startBatchWorker();
   }
   console.log(`[batch-queue] Added ${addedCount} jobs, total: ${batchQueue.items.length}`);
-  
+
+  // 返回真实的活跃任务数量
+  const finalActiveCount = batchQueue.items.filter(j => ACTIVE_STATUSES.has(j.status)).length;
+
   return {
     ok: true,
     added: addedCount,
     ids: addedIds,
-    activeCount: activeCount + addedCount,
+    activeCount: finalActiveCount,
   };
 }
 

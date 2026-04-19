@@ -102,6 +102,9 @@ services:
       - ALLOW_LOCAL_AI_ENDPOINT=${ALLOW_LOCAL_AI_ENDPOINT:-true}
       # Node.js 内存限制：与 deploy.resources.limits.memory 匹配
       - NODE_OPTIONS=--max-old-space-size=3072
+      # 批处理队列容量限制
+      - QUEUE_MAX_ACTIVE=${QUEUE_MAX_ACTIVE:-10}
+      - QUEUE_MAX_BATCH=${QUEUE_MAX_BATCH:-10}
       - TZ=Asia/Shanghai
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:8788/health"]
