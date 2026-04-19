@@ -176,6 +176,9 @@ export async function restoreBatchQueue() {
     const savedBuildId = String(saved.buildId || '');
     const currentBuildId = String(process.env.BUILD_ID || '');
     const shouldClearOnBoot = process.env.CLEAR_QUEUE_ON_BOOT === 'true';
+    
+    console.log(`[batch-queue] Restore check: schemaVersion=${schemaVersion} (raw=${saved.schemaVersion}), savedBuildId="${savedBuildId}", currentBuildId="${currentBuildId}", shouldClear=${shouldClearOnBoot}`);
+    console.log(`[batch-queue] saved.items: ${saved.items?.length}, saved keys: ${Object.keys(saved).join(',')}`);
 
     if (schemaVersion < 2 || savedBuildId !== currentBuildId || shouldClearOnBoot) {
       const reason = schemaVersion < 2 ? 'schema 版本不匹配' :
@@ -588,10 +591,13 @@ async function syncMaterialToDb(materialId, updates) {
 }
 
 async function finalizeAffectedMaterials(jobs) {
-  const activeStatuses = new Set(['pending', 'uploading', 'uploaded', 'mineru', 'ai']);
+  // 除 completed 外的所有状态都需要兜底回写
+  // （error/skipped 理论上 worker 已经同步过，但作为 defense-in-depth 再写一次，
+  //  覆盖 worker syncMaterialToDb 失败或取消路径遗漏的情况）
+  const SKIP_STATUSES = new Set(['completed']);
   const ids = [...new Set(
     jobs
-      .filter(j => activeStatuses.has(j.status) && j.materialId)
+      .filter(j => !SKIP_STATUSES.has(j.status) && j.materialId)
       .map(j => Number(j.materialId))
   )];
 
@@ -1158,11 +1164,14 @@ async function batchWorkerLoop() {
         });
         if (job.materialId) {
           await syncMaterialToDb(job.materialId, {
-            status: 'pending',
+            status: 'failed',
+            mineruStatus: 'failed',
+            aiStatus: 'failed',
             metadata: {
               processingStage: '',
               processingMsg: '已取消',
               processingUpdatedAt: new Date().toISOString(),
+              lastQueuedAt: 0,
             },
           });
         }

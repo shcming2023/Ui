@@ -3368,7 +3368,11 @@ const server = app.listen(port, async () => {
     cleanupTempFile,
   });
   await restoreBatchQueue();
+  const qs = getQueueStatus();
+  console.log(`[upload-server] After restore: items=${qs.total}, running=${qs.running}`);
   await recoverOrphanMaterials();
+  const qs2 = getQueueStatus();
+  console.log(`[upload-server] After orphan recovery: items=${qs2.total}`);
   console.log('[upload-server] Batch queue engine initialized');
 });
 
