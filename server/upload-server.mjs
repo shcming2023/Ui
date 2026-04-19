@@ -48,6 +48,7 @@ import {
   readAlerts,
   patchJob,
   retryFailed, retryJob, removeJob, reorderPending, clearCompleted, clearAll,
+  removeJobsByMaterialIds,
   shutdown as shutdownBatchQueue,
 } from './batch-queue.mjs';
 
@@ -3211,6 +3212,8 @@ app.post('/delete-material', async (req, res) => {
       errors.push({ id, error: err.message });
     }
   }
+  // 清理队列中对应的任务
+  removeJobsByMaterialIds(materialIds);
   res.json({ ok: true, results, errors });
 });
 

@@ -146,6 +146,9 @@ async function persistBatchQueue() {
       autoAI: batchQueue.autoAI,
       updatedAt: Date.now(),
     };
+    // 添加 schema 版本和构建标记
+    snapshot.schemaVersion = 2;
+    snapshot.buildId = process.env.BUILD_ID || '';
     await fetch(`${dbBaseUrl}/settings/serverBatchQueue`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
@@ -167,6 +170,22 @@ export async function restoreBatchQueue() {
     const settings = await res.json();
     const saved = settings?.serverBatchQueue;
     if (!saved || !Array.isArray(saved.items)) return;
+
+    // 检查 schema 版本或构建 ID 是否变化
+    const schemaVersion = Number(saved.schemaVersion || 1);
+    const savedBuildId = String(saved.buildId || '');
+    const currentBuildId = String(process.env.BUILD_ID || '');
+    const shouldClearOnBoot = process.env.CLEAR_QUEUE_ON_BOOT === 'true';
+
+    if (schemaVersion < 2 || savedBuildId !== currentBuildId || shouldClearOnBoot) {
+      const reason = schemaVersion < 2 ? 'schema 版本不匹配' :
+                     savedBuildId !== currentBuildId ? `构建 ID 变化（${savedBuildId} → ${currentBuildId}）` :
+                     'CLEAR_QUEUE_ON_BOOT=true';
+      console.log(`[batch-queue] 跳过恢复队列快照：${reason}，使用空队列`);
+      batchQueue.items = [];
+      batchQueue.alerts = [];
+      return;
+    }
 
     batchQueue.items = saved.items.map(j => {
       const mineruTaskId = String(j.mineruTaskId || '').trim();
@@ -258,6 +277,7 @@ export async function recoverOrphanMaterials() {
         const aiStatus = String(material?.aiStatus || '').toLowerCase();
         const status = String(material?.status || '').toLowerCase();
         const objectName = String(material?.metadata?.objectName || '').trim();
+        const lastQueuedAt = Number(material?.metadata?.lastQueuedAt || 0);
 
         const isProcessingState =
           mineruStatus === 'pending' ||
@@ -265,7 +285,11 @@ export async function recoverOrphanMaterials() {
           aiStatus === 'analyzing' ||
           status === 'processing';
 
-        return isProcessingState && !!objectName;
+        // 只有最近 24h 内入过队的才算是真正的"中断孤儿"
+        const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
+        const isRecentOrphan = lastQueuedAt > 0 && (Date.now() - lastQueuedAt) < STALE_THRESHOLD_MS;
+
+        return isProcessingState && !!objectName && isRecentOrphan;
       })
       .map((material) => ({
         fileName: String(material?.title || material?.name || `material-${material.id}`),
@@ -839,19 +863,20 @@ async function processOneJob(job) {
   });
 
   // 同步 material 状态
-  if (job.materialId) {
-    await syncMaterialToDb(job.materialId, {
-      mineruStatus: 'completed',
-      metadata: {
-        markdownObjectName,
-        markdownUrl,
-        processingStage: batchQueue.autoAI ? 'ai' : '',
-        processingMsg: 'MinerU 解析完成',
-        processingProgress: '75',
-        processingUpdatedAt: new Date().toISOString(),
-      },
-    });
-  }
+    if (job.materialId) {
+      await syncMaterialToDb(job.materialId, {
+        mineruStatus: 'completed',
+        metadata: {
+          markdownObjectName,
+          markdownUrl,
+          processingStage: batchQueue.autoAI ? 'ai' : '',
+          processingMsg: 'MinerU 解析完成',
+          processingProgress: '75',
+          processingUpdatedAt: new Date().toISOString(),
+          lastQueuedAt: 0, // 任务完成，清零时间戳
+        },
+      });
+    }
 
   // 释放 fileBuffer 引用，帮助 GC
   // (fileBuffer 在此作用域结束后自然释放)
@@ -1012,6 +1037,7 @@ ${mdContext}
         aiConfidence: String(aiResult.confidence),
         aiAnalyzedAt: new Date().toISOString(),
         processingStage: '',
+        lastQueuedAt: 0, // 任务完成，清零时间戳
         processingMsg: '',
         processingProgress: '100',
         processingUpdatedAt: new Date().toISOString(),
@@ -1133,6 +1159,7 @@ async function batchWorkerLoop() {
               processingStage: '',
               processingMsg: `处理失败（需人工处理）: ${message}`,
               processingUpdatedAt: new Date().toISOString(),
+              lastQueuedAt: 0, // 任务失败，清零时间戳
             },
           });
         }
@@ -1153,6 +1180,7 @@ async function batchWorkerLoop() {
               processingStage: '',
               processingMsg: `处理失败（不可重试）：${message}`,
               processingUpdatedAt: new Date().toISOString(),
+              lastQueuedAt: 0, // 任务失败，清零时间戳
             },
           });
         }
@@ -1175,6 +1203,7 @@ async function batchWorkerLoop() {
               processingStage: '',
               processingMsg: `处理失败（不可重试）：${message}`,
               processingUpdatedAt: new Date().toISOString(),
+              lastQueuedAt: 0, // 任务失败，清零时间戳
             },
           });
         }
@@ -1222,6 +1251,7 @@ async function batchWorkerLoop() {
               processingStage: '',
               processingMsg: `处理失败（已重试 ${job.retries}/${job.maxRetries || BATCH_MAX_RETRIES} 次）: ${message}`,
               processingUpdatedAt: new Date().toISOString(),
+              lastQueuedAt: 0, // 任务失败，清零时间戳
             },
           });
         }
@@ -1312,6 +1342,12 @@ export function addJobs(jobs) {
         addedIds.push(existing.id);
         continue;
       }
+      // 更新 material 的 lastQueuedAt 时间戳
+      syncMaterialToDb(materialId, {
+        metadata: {
+          lastQueuedAt: now,
+        },
+      });
     }
 
     const status = j.status === 'uploading' || j.status === 'pending' ? j.status : 'pending';
@@ -1524,6 +1560,23 @@ export function clearCompleted() {
   batchQueue.updatedAt = Date.now();
   if (removed > 0) persistBatchQueue();
   return { ok: true, removed };
+}
+
+/** 按 materialId 批量删除队列中的任务 */
+export function removeJobsByMaterialIds(materialIds) {
+  const idsSet = new Set(materialIds);
+  const before = batchQueue.items.length;
+  const removedIds = batchQueue.items
+    .filter(j => idsSet.has(j.materialId))
+    .map(j => j.id);
+  batchQueue.items = batchQueue.items.filter(j => !idsSet.has(j.materialId));
+  if (Array.isArray(batchQueue.alerts) && removedIds.length > 0) {
+    batchQueue.alerts = batchQueue.alerts.filter((a) => !a?.jobId || !removedIds.has(String(a.jobId)));
+  }
+  const removed = before - batchQueue.items.length;
+  batchQueue.updatedAt = Date.now();
+  if (removed > 0) persistBatchQueue();
+  return { ok: true, removed, removedIds };
 }
 
 /** 清空全部任务（停止队列） */

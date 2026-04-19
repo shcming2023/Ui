@@ -39,8 +39,13 @@
 
 **数据持久化层次**：
 - `cms-minio-data` 卷 → 上传的原始文件（PDF、图片等）；原始文件路径格式：`originals/{materialId}/{timestamp}-name.pdf`
-- `cms-db-data` 卷 → 业务数据（资料库、标签、规则等，JSON 文件存储）
+- `cms-db-data` 卷 → 业务数据（资料库、标签、规则等，JSON 文件存储），同时包含批处理队列快照
 - 浏览器 `localStorage` → 当前会话缓存，启动时优先从 db-server 加载
+
+> **重要**：`cms-db-data` 和 `cms-minio-data` 是**状态卷，不是镜像卷**。
+> - `docker compose up -d --build` 只重建镜像，不会清空这些卷
+> - 生产环境默认行为：重启后保留所有数据和队列状态
+> - 开发期如需全新启动：`docker compose down -v && docker compose up -d --build` 或设置 `CLEAR_QUEUE_ON_BOOT=true`
 
 ---
 
