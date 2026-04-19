@@ -3234,8 +3234,23 @@ app.post('/batch/jobs', (req, res) => {
     res.status(400).json({ error: '缺少 jobs 数组' });
     return;
   }
-  const ids = addJobs(jobs);
-  res.json({ ok: true, added: ids.length, ids });
+
+  // addJobs 现在返回完整结果对象（含 ok 字段）
+  const result = addJobs(jobs);
+
+  if (!result.ok) {
+    // 统一用 409 Conflict 表达"容量冲突"
+    res.status(409).json(result);
+    return;
+  }
+
+  res.json(result);
+});
+
+// GET /batch/capacity - 获取队列容量信息（供前端上传前预查）
+app.get('/batch/capacity', (_req, res) => {
+  const status = getQueueStatus();
+  res.json(status.capacity);
 });
 
 // POST /batch/start - 启动队列处理

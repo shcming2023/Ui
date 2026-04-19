@@ -37,6 +37,26 @@ const BATCH_RETRY_BASE_DELAY = 30000;  // 30s 基础退避
 const BATCH_INTER_FILE_DELAY = 3000;   // 文件间 3s 冷却
 const BATCH_MEMORY_THRESHOLD = 0.75;   // 系统内存使用超过 75% 时暂停
 
+// ─── 队列容量限制 ───────────────────────────────────────────
+const QUEUE_MAX_ACTIVE = Number(process.env.QUEUE_MAX_ACTIVE || 10);
+const QUEUE_MAX_BATCH = Number(process.env.QUEUE_MAX_BATCH || 10);
+
+// 计入上限的状态（活跃任务）：
+const ACTIVE_STATUSES = new Set([
+  'pending',    // 等待处理
+  'uploading',  // 上传中
+  'uploaded',   // 上传完成，等待 MinerU
+  'mineru',     // MinerU 解析中
+  'ai',         // AI 分析中
+  'error',      // 失败（占位，等待用户重试或清理）
+]);
+
+// 不计入上限的状态（已终态）：
+const INACTIVE_STATUSES = new Set([
+  'completed',  // 完成
+  'skipped',    // 已取消
+]);
+
 // ─── 队列状态 ─────────────────────────────────────────────────
 const batchQueue = {
   items: [],        // Array<BatchJob>
@@ -1432,6 +1452,9 @@ export function getQueueStatus() {
   const alerts = Array.isArray(batchQueue.alerts) ? batchQueue.alerts : [];
   const unreadAlerts = alerts.filter((a) => a && a.read !== true).length;
 
+  // 计算活跃任务数量（用于容量限制）
+  const activeCount = batchQueue.items.filter(j => ACTIVE_STATUSES.has(j.status)).length;
+
   return {
     running: batchQueue.running,
     paused: batchQueue.paused,
@@ -1457,13 +1480,66 @@ export function getQueueStatus() {
     unreadAlerts,
     memory: mem,
     updatedAt: batchQueue.updatedAt,
+    // 新增：容量信息
+    capacity: {
+      max: QUEUE_MAX_ACTIVE,
+      active: activeCount,
+      available: Math.max(0, QUEUE_MAX_ACTIVE - activeCount),
+      batchMax: QUEUE_MAX_BATCH,
+      isFull: activeCount >= QUEUE_MAX_ACTIVE,
+    },
   };
 }
 
 /** 添加任务到队列 */
 export function addJobs(jobs) {
+  // 规则 1：单次提交数量限制
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    return {
+      ok: false,
+      error: '任务列表为空',
+      code: 'EMPTY_JOBS',
+    };
+  }
+
+  if (jobs.length > QUEUE_MAX_BATCH) {
+    return {
+      ok: false,
+      error: `单次最多提交 ${QUEUE_MAX_BATCH} 个文件，当前提交 ${jobs.length} 个`,
+      code: 'BATCH_LIMIT_EXCEEDED',
+      limit: QUEUE_MAX_BATCH,
+      submitted: jobs.length,
+    };
+  }
+
+  // 规则 2：队列总容量限制
+  const activeCount = batchQueue.items.filter(j => ACTIVE_STATUSES.has(j.status)).length;
+  const available = QUEUE_MAX_ACTIVE - activeCount;
+
+  if (available <= 0) {
+    return {
+      ok: false,
+      error: `队列已满（${activeCount}/${QUEUE_MAX_ACTIVE}），请等待当前任务完成或清理失败任务后再提交`,
+      code: 'QUEUE_FULL',
+      activeCount,
+      limit: QUEUE_MAX_ACTIVE,
+    };
+  }
+
+  if (jobs.length > available) {
+    return {
+      ok: false,
+      error: `队列剩余容量 ${available} 个，当前提交 ${jobs.length} 个，超出 ${jobs.length - available} 个`,
+      code: 'QUEUE_CAPACITY_EXCEEDED',
+      activeCount,
+      available,
+      submitted: jobs.length,
+      limit: QUEUE_MAX_ACTIVE,
+    };
+  }
+
+  // 通过校验，正常入队
   const now = Date.now();
-  const activeStatuses = new Set(['uploading', 'pending', 'uploaded', 'mineru', 'ai']);
   const addedIds = [];
   let addedCount = 0;
 
@@ -1471,7 +1547,7 @@ export function addJobs(jobs) {
     const materialId = j.materialId || 0;
     if (materialId) {
       const existing = batchQueue.items.find(
-        (item) => item.materialId === materialId && activeStatuses.has(item.status),
+        (item) => item.materialId === materialId && ACTIVE_STATUSES.has(item.status),
       );
       if (existing) {
         console.log(`[batch-queue] Skip duplicate job for materialId=${materialId} (existing=${existing.id}, status=${existing.status})`);
@@ -1521,7 +1597,13 @@ export function addJobs(jobs) {
     startBatchWorker();
   }
   console.log(`[batch-queue] Added ${addedCount} jobs, total: ${batchQueue.items.length}`);
-  return addedIds;
+  
+  return {
+    ok: true,
+    added: addedCount,
+    ids: addedIds,
+    activeCount: activeCount + addedCount,
+  };
 }
 
 export function patchJob(jobId, updates = {}) {
