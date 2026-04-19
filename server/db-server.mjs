@@ -300,6 +300,47 @@ app.delete('/materials', (req, res) => {
   res.json({ ok: true, deleted: ids.length });
 });
 
+// POST /materials/bulk-patch
+// Body: { ids: number[], updates: Partial<Material> }
+app.post('/materials/bulk-patch', (req, res) => {
+  const { ids, updates } = req.body || {};
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return res.status(400).json({ error: '缺少 ids 数组' });
+  }
+  if (!updates || typeof updates !== 'object') {
+    return res.status(400).json({ error: '缺少 updates 对象' });
+  }
+
+  const updated = [];
+  for (const id of ids) {
+    if (dbCache.materials[id]) {
+      // 锁定 id，防止意外修改
+      const updatesCopy = { ...updates };
+      delete updatesCopy.id;
+
+      // metadata 浅合并，避免覆盖已有字段
+      if (updates.metadata && typeof updates.metadata === 'object' && dbCache.materials[id].metadata) {
+        dbCache.materials[id] = {
+          ...dbCache.materials[id],
+          ...updatesCopy,
+          metadata: {
+            ...dbCache.materials[id].metadata,
+            ...updates.metadata,
+          },
+        };
+      } else {
+        dbCache.materials[id] = {
+          ...dbCache.materials[id],
+          ...updatesCopy,
+        };
+      }
+      updated.push(id);
+    }
+  }
+  writeDB();
+  res.json({ ok: true, updated, count: updated.length });
+});
+
 // ─── Asset Details ────────────────────────────────────────────
 
 app.get('/asset-details', (_req, res) => {

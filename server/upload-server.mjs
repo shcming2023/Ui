@@ -3281,8 +3281,8 @@ app.post('/batch/retry/:jobId', (req, res) => {
 });
 
 // DELETE /batch/job/:jobId - 移除指定任务
-app.delete('/batch/job/:jobId', (req, res) => {
-  res.json(removeJob(req.params.jobId));
+app.delete('/batch/job/:jobId', async (req, res) => {
+  res.json(await removeJob(req.params.jobId));
 });
 
 // PATCH /batch/job/:jobId - 更新指定任务（用于 uploading → pending / error）
@@ -3312,8 +3312,8 @@ app.post('/batch/clear-completed', (_req, res) => {
 });
 
 // POST /batch/clear-all - 清空全部任务（停止队列）
-app.post('/batch/clear-all', (_req, res) => {
-  res.json(clearAll());
+app.post('/batch/clear-all', async (_req, res) => {
+  res.json(await clearAll());
 });
 
 app.use((err, req, res, _next) => {

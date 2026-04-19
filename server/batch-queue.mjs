@@ -587,6 +587,43 @@ async function syncMaterialToDb(materialId, updates) {
   }
 }
 
+async function finalizeAffectedMaterials(jobs) {
+  const activeStatuses = new Set(['pending', 'uploading', 'uploaded', 'mineru', 'ai']);
+  const ids = [...new Set(
+    jobs
+      .filter(j => activeStatuses.has(j.status) && j.materialId)
+      .map(j => Number(j.materialId))
+  )];
+
+  if (ids.length === 0) return { finalized: 0 };
+
+  try {
+    await fetch(`${dbBaseUrl}/materials/bulk-patch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ids,
+        updates: {
+          status: 'failed',
+          mineruStatus: 'failed',
+          aiStatus: 'failed',
+          metadata: {
+            processingStage: '',
+            processingMsg: '任务已取消',
+            processingUpdatedAt: new Date().toISOString(),
+            lastQueuedAt: 0,
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    return { finalized: ids.length };
+  } catch (e) {
+    console.warn(`[batch-queue] finalizeMaterials failed:`, e.message);
+    return { finalized: 0, error: e.message };
+  }
+}
+
 async function addMaterialToDb(material) {
   try {
     await fetch(`${dbBaseUrl}/materials`, {
@@ -1512,12 +1549,16 @@ export function retryJob(jobId) {
 }
 
 /** 移除任务 */
-export function removeJob(jobId) {
+export async function removeJob(jobId) {
   const idx = batchQueue.items.findIndex(j => j.id === jobId);
   if (idx === -1) return { ok: false, error: '任务不存在' };
-  batchQueue.items.splice(idx, 1);
+  const removed = batchQueue.items.splice(idx, 1)[0];
   batchQueue.updatedAt = Date.now();
-  persistBatchQueue();
+  await persistBatchQueue();
+  // 级联回写 material 终态
+  if (removed.materialId) {
+    await finalizeAffectedMaterials([removed]);
+  }
   return { ok: true };
 }
 
@@ -1580,14 +1621,17 @@ export function removeJobsByMaterialIds(materialIds) {
 }
 
 /** 清空全部任务（停止队列） */
-export function clearAll() {
+export async function clearAll() {
+  const itemsBefore = [...batchQueue.items];
   batchQueue.running = false;
   batchQueue.paused = false;
   batchQueue.items = [];
   batchQueue.alerts = [];
   batchQueue.updatedAt = Date.now();
-  persistBatchQueue();
-  return { ok: true };
+  await persistBatchQueue();
+  // 级联回写 materials 终态
+  const result = await finalizeAffectedMaterials(itemsBefore);
+  return { ok: true, finalized: result.finalized };
 }
 
 /** 优雅停机时调用 */
