@@ -275,12 +275,14 @@ export async function recoverOrphanMaterials() {
         mimeType: String(material?.mimeType || 'application/pdf'),
         materialId: Number(material?.id || 0),
         status: 'pending',
-      }));
+        uploadTimestamp: Number(material?.uploadTimestamp || Date.now()), // 按上传时间排序
+      }))
+      .sort((a, b) => (a.uploadTimestamp || 0) - (b.uploadTimestamp || 0)); // 按时间升序，最早的先处理
 
     if (orphanJobs.length === 0) return;
 
     addJobs(orphanJobs);
-    console.log(`[batch-queue] Recovered ${orphanJobs.length} orphan materials`);
+    console.log(`[batch-queue] Recovered ${orphanJobs.length} orphan materials (sorted by uploadTimestamp)`);
   } catch (e) {
     console.warn('[batch-queue] recover orphan materials failed:', e.message);
   }
@@ -746,11 +748,29 @@ async function processOneJob(job) {
     updateJob(job.id, { mineruTaskId, mineruSubmittedAt: Date.now() });
     persistBatchQueue();
     console.log(`[batch-queue] MinerU task submitted: ${mineruTaskId} for ${job.fileName}`);
+
+    // 立即轮询一次确认任务实际状态，避免任务在队列中等待时误报为 processing
+    let actualStatus = 'queued';
+    try {
+      const initialStatusRes = await deps.fetchMinerUTaskStatus(localEndpoint, mineruTaskId, 10_000, abortSignal);
+      actualStatus = String(initialStatusRes?.status || 'queued').toLowerCase();
+      console.log(`[batch-queue] MinerU task ${mineruTaskId} initial status: ${actualStatus}`);
+    } catch (e) {
+      console.warn(`[batch-queue] Failed to fetch initial status for ${mineruTaskId}:`, e.message);
+      actualStatus = 'queued';
+    }
+
+    // 若任务在队列中等待，保持 pending 状态；若已开始处理，才更新为 processing
+    if (actualStatus === 'processing' || actualStatus === 'parsing') {
+      updateJob(job.id, { progress: 50, message: `MinerU 任务 ${mineruTaskId} 处理中...`, status: 'processing' });
+    } else {
+      updateJob(job.id, { progress: 40, message: `MinerU 任务 ${mineruTaskId} 已提交，排队中...` });
+    }
+
   } else {
     console.log(`[batch-queue] Reusing MinerU task_id=${mineruTaskId} for ${job.fileName}`);
+    updateJob(job.id, { progress: 50, message: `MinerU 任务 ${mineruTaskId} 处理中...` });
   }
-
-  updateJob(job.id, { progress: 50, message: `MinerU 任务 ${mineruTaskId} 处理中...` });
 
   // 轮询等待完成
   await deps.waitMinerUTask(localEndpoint, mineruTaskId, timeoutMs, (statusPayload) => {
@@ -764,6 +784,27 @@ async function processOneJob(job) {
   updateJob(job.id, { progress: 70, message: '解析完成，提取结果...' });
   const resultPayload = await deps.fetchMinerUResult(localEndpoint, mineruTaskId, timeoutMs, abortSignal);
   const markdown = deps.extractLocalMarkdown(resultPayload);
+
+  // 校验返回结果是否合理（页数/大小检查）
+  if (markdown) {
+    const mdSize = markdown.length;
+    const fileSize = Number(job.fileSize || 0);
+    // 如果文件很小（<1MB），但返回的 Markdown 极大（>10MB），可能返回了错误的任务结果
+    if (fileSize > 0 && fileSize < 1024 * 1024 && mdSize > 10 * 1024 * 1024) {
+      console.warn(
+        `[batch-queue] Suspicious result size: file=${fileSize}B but markdown=${mdSize}B for task ${mineruTaskId}, may have fetched wrong result`
+      );
+    }
+    // 估算页数（每页约 500-5000 字符），不合理时记录警告
+    const estimatedPages = Math.floor(mdSize / 2000);
+    if (estimatedPages > 10000 || estimatedPages < 0) {
+      console.warn(
+        `[batch-queue] Suspicious page count: estimated ${estimatedPages} pages for task ${mineruTaskId} (${mdSize} bytes)`
+      );
+    } else {
+      console.log(`[batch-queue] Fetched result for task ${mineruTaskId}: ~${estimatedPages} pages (${mdSize} bytes)`);
+    }
+  }
 
   if (!markdown) {
     throw new Error('MinerU 未返回 Markdown 内容');

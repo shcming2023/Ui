@@ -851,6 +851,7 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
   };
 
   const silenceTimeoutMs = 15 * 60 * 1000;
+  const absoluteDeadlineAt = Date.now() + Math.max(0, Number(timeoutMs || 0));
   let lastSuccessfulPollAt = Date.now();
   let lastStatus = '';
   let lastPayload = null;
@@ -859,6 +860,11 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
       const err = new Error('已取消');
       err.name = 'AbortError';
       throw err;
+    }
+    if (timeoutMs > 0 && Date.now() > absoluteDeadlineAt) {
+      throw new Error(
+        `MinerU 任务处理超时（已等待 ${Math.round(timeoutMs / 1000)}s），任务一直处于 "${lastStatus || 'unknown'}" 状态，taskId=${taskId}。请检查 MinerU 服务日志或增大超时配置。`
+      );
     }
     if (Date.now() - lastSuccessfulPollAt > silenceTimeoutMs) {
       const snippet = lastPayload ? JSON.stringify(lastPayload).slice(0, 200) : '';
@@ -915,6 +921,16 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress, sign
 
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
+}
+
+async function fetchMinerUTaskStatus(localEndpoint, taskId, timeoutMs = 10_000, signal = null) {
+  const response = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(taskId)}`, {
+    signal: signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+  return await response.json();
 }
 
 async function fetchMinerUResult(localEndpoint, taskId, timeoutMs, signal = null) {
@@ -1683,9 +1699,6 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
     const parseMethod = String(req.body?.parseMethod || req.body?.parse_method || '').trim();
     const rawServerUrl = String(req.body?.serverUrl || req.body?.server_url || req.body?.url || '').trim();
     const serverUrl = dockerRewriteEndpoint(rawServerUrl);
-    if (!serverUrl && /http-client/i.test(backend)) {
-      throw new Error('本地 MinerU 参数缺失：当前 backend 需要配置 server_url');
-    }
 
     const candidates = [
       `${localEndpoint}/health`,
@@ -1719,6 +1732,13 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
     const fileSize = Number(req.file.size || 0);
     const dynamicSubmitTimeoutMs = Math.max(120_000, Math.ceil(fileSize / 1024) * 50);
     const submitTimeoutMs = Math.max(timeoutMs, dynamicSubmitTimeoutMs);
+    const effectiveBackend =
+      (fileSize > 0 && fileSize < 2 * 1024 * 1024 && /hybrid/i.test(backend))
+        ? 'pipeline'
+        : backend;
+    if (!serverUrl && /http-client/i.test(effectiveBackend)) {
+      throw new Error('本地 MinerU 参数缺失：当前 backend 需要配置 server_url');
+    }
 
     let finalParseMethod = parseMethod || 'auto';
     if (enableOcr && !parseMethod) {
@@ -1727,21 +1747,17 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
 
     const boundary = `----luceon-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     const fields = [];
-    fields.push(['backend', backend]);
+    fields.push(['backend', effectiveBackend]);
     for (const lang of String(ocrLanguage || 'ch').split(',').map((item) => item.trim()).filter(Boolean)) {
       fields.push(['lang_list', lang]);
-      fields.push(['langlist', lang]);
     }
     fields.push(['parse_method', finalParseMethod]);
-    fields.push(['formula_enable', String(enableFormula)]);
-    fields.push(['table_enable', String(enableTable)]);
+    fields.push(['formula_enable', enableFormula ? '1' : '0']);
+    fields.push(['table_enable', enableTable ? '1' : '0']);
     if (serverUrl) {
       fields.push(['server_url', serverUrl]);
-      fields.push(['serverurl', serverUrl]);
     }
-    fields.push(['return_md', 'true']);
     fields.push(['response_format_zip', 'false']);
-    fields.push(['responseformatzip', 'false']);
     if (Number.isFinite(maxPages) && maxPages > 0) {
       const endPageId = String(Math.max(0, Math.floor(maxPages) - 1));
       fields.push(['end_page_id', endPageId]);
@@ -1818,18 +1834,18 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
     } else {
       const gradioBoundary = `----luceon-${Date.now()}-${Math.random().toString(16).slice(2)}`;
       const fields = [];
-      fields.push(['backend', backend]);
+      fields.push(['backend', effectiveBackend]);
       fields.push(['max_pages', String(maxPages)]);
       fields.push(['ocr_language', ocrLanguage]);
-      fields.push(['table_enable', String(enableTable)]);
-      fields.push(['formula_enable', String(enableFormula)]);
+      fields.push(['table_enable', enableTable ? '1' : '0']);
+      fields.push(['formula_enable', enableFormula ? '1' : '0']);
       fields.push(['language', req.body?.language || ocrLanguage]);
-      fields.push(['enableOcr', String(enableOcr)]);
-      fields.push(['enableFormula', String(enableFormula)]);
-      fields.push(['enableTable', String(enableTable)]);
-      fields.push(['enable_ocr', String(enableOcr)]);
-      fields.push(['enable_formula', String(enableFormula)]);
-      fields.push(['enable_table', String(enableTable)]);
+      fields.push(['enableOcr', enableOcr ? '1' : '0']);
+      fields.push(['enableFormula', enableFormula ? '1' : '0']);
+      fields.push(['enableTable', enableTable ? '1' : '0']);
+      fields.push(['enable_ocr', enableOcr ? '1' : '0']);
+      fields.push(['enable_formula', enableFormula ? '1' : '0']);
+      fields.push(['enable_table', enableTable ? '1' : '0']);
 
       const multipart = createMultipartStream({
         boundary: gradioBoundary,
@@ -3337,6 +3353,7 @@ const server = app.listen(port, async () => {
     buildMarkdownContext,
     callGradioToMarkdown,
     waitMinerUTask,
+    fetchMinerUTaskStatus,
     fetchMinerUResult,
     analyzeWithFallback,
     calcPages,
