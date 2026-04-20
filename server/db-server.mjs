@@ -280,7 +280,16 @@ app.get('/secrets', (_req, res) => {
   res.json({ ok: true, secrets: secretsCache });
 });
 
+const ALLOWED_SECRETS_KEYS = new Set(['aiKeys', 'mineruKey', 'minioCredentials']);
+
 app.put('/secrets', requireBody, (req, res) => {
+  for (const key of Object.keys(req.body)) {
+    if (!ALLOWED_SECRETS_KEYS.has(key)) {
+      res.status(400).json({ error: `secrets key "${key}" 不在允许列表内` });
+      return;
+    }
+  }
+
   const nextSecrets = { ...secretsCache };
   for (const [key, val] of Object.entries(req.body)) {
     if (typeof val === 'string') nextSecrets[key] = val;
