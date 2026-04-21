@@ -7,12 +7,14 @@ import {
   BookOpen,
   Bell,
   GraduationCap,
+  ListTodo
 } from 'lucide-react';
 import { BatchProcessingController, BatchProgressFab, BatchUploadModal } from './BatchUploadModal';
 
 /* ── 侧边栏主导航 ──────────────────────────────────────────── */
 const SIDE_NAV = [
   { name: '工作台',     href: '/workspace',  icon: FolderOpen },
+  { name: '任务管理',   href: '/tasks',      icon: ListTodo },
   { name: '成果库',     href: '/library',    icon: GraduationCap },
 ];
 

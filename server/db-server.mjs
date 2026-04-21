@@ -83,6 +83,9 @@ const EMPTY_DB = {
   assetDetails: {},    // id → AssetDetail
   processTasks: {},    // id → ProcessTask
   tasks: {},           // id → Task
+  parseTasks: {},      // id → ParseTask
+  aiMetadataJobs: {},  // id → AiMetadataJob
+  taskEvents: {},      // id → TaskEvent
   products: {},        // id → Product
   flexibleTags: {},    // id → FlexibleTag
   aiRules: {},         // id → AiRule
@@ -239,6 +242,9 @@ app.get('/stats', (_req, res) => {
       assetDetails: Object.keys(dbCache.assetDetails).length,
       processTasks: Object.keys(dbCache.processTasks).length,
       tasks: Object.keys(dbCache.tasks).length,
+      parseTasks: Object.keys(dbCache.parseTasks).length,
+      aiMetadataJobs: Object.keys(dbCache.aiMetadataJobs).length,
+      taskEvents: Object.keys(dbCache.taskEvents).length,
       products: Object.keys(dbCache.products).length,
       flexibleTags: Object.keys(dbCache.flexibleTags).length,
       aiRules: Object.keys(dbCache.aiRules).length,
@@ -501,25 +507,53 @@ app.delete('/process-tasks', (req, res) => {
   res.json({ ok: true, deleted: ids.length });
 });
 
-// ─── Tasks ────────────────────────────────────────────────────
+// ─── Parse Tasks (exposed as /tasks as per PRD) ───────────────
 
 app.get('/tasks', (_req, res) => {
-  res.json(Object.values(dbCache.tasks));
+  const list = Object.values(dbCache.parseTasks).sort((a, b) => {
+    // 降序排序，新任务在前
+    if (a.createdAt && b.createdAt) return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    return 0;
+  });
+  res.json(list);
+});
+
+app.get('/tasks/:id', (req, res) => {
+  const id = req.params.id;
+  const item = dbCache.parseTasks[id];
+  if (!item) { res.status(404).json({ error: 'not found' }); return; }
+  res.json(item);
 });
 
 app.post('/tasks', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  dbCache.tasks[item.id] = item;
+  dbCache.parseTasks[item.id] = {
+    createdAt: new Date().toISOString(),
+    ...item
+  };
   writeDB();
+  
+  // 记录一条创建事件
+  const eventId = `evt-${Date.now()}`;
+  dbCache.taskEvents[eventId] = {
+    id: eventId,
+    taskId: item.id,
+    taskType: 'parse',
+    level: 'info',
+    event: 'created',
+    message: '解析任务已由 upload-server 创建，正进入处理队列',
+    createdAt: new Date().toISOString()
+  };
+  
   res.json({ ok: true, id: item.id });
 });
 
 app.patch('/tasks/:id', (req, res) => {
   const id = req.params.id;
-  const existing = dbCache.tasks[id];
+  const existing = dbCache.parseTasks[id];
   if (!existing) { res.status(404).json({ error: 'not found' }); return; }
-  dbCache.tasks[id] = { ...existing, ...req.body };
+  dbCache.parseTasks[id] = { ...existing, ...req.body, updatedAt: new Date().toISOString() };
   writeDB();
   res.json({ ok: true, id });
 });
@@ -529,9 +563,45 @@ app.delete('/tasks', (req, res) => {
   if (!Array.isArray(ids) || ids.length === 0) {
     res.status(400).json({ error: '缺少 ids 数组' }); return;
   }
-  for (const id of ids) delete dbCache.tasks[id];
+  for (const id of ids) delete dbCache.parseTasks[id];
   writeDB();
   res.json({ ok: true, deleted: ids.length });
+});
+
+app.get('/task-events', (req, res) => {
+  const taskId = req.query.taskId;
+  const list = Object.values(dbCache.taskEvents);
+  if (taskId) {
+    res.json(list.filter(e => String(e.taskId) === String(taskId)).sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()));
+  } else {
+    res.json(list);
+  }
+});
+
+// ─── AI Metadata Jobs ─────────────────────────────────────────
+
+app.get('/ai-metadata-jobs', (_req, res) => {
+  res.json(Object.values(dbCache.aiMetadataJobs));
+});
+
+app.post('/ai-metadata-jobs', (req, res) => {
+  const item = req.body;
+  if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
+  dbCache.aiMetadataJobs[item.id] = {
+    createdAt: new Date().toISOString(),
+    ...item
+  };
+  writeDB();
+  res.json({ ok: true, id: item.id });
+});
+
+app.patch('/ai-metadata-jobs/:id', (req, res) => {
+  const id = req.params.id;
+  const existing = dbCache.aiMetadataJobs[id];
+  if (!existing) { res.status(404).json({ error: 'not found' }); return; }
+  dbCache.aiMetadataJobs[id] = { ...existing, ...req.body };
+  writeDB();
+  res.json({ ok: true, id });
 });
 
 // ─── Products ─────────────────────────────────────────────────
@@ -681,7 +751,7 @@ app.post('/backup/import', (req, res) => {
 
 app.post('/bulk-restore', (req, res) => {
   const {
-    materials, assetDetails, processTasks, tasks,
+    materials, assetDetails, processTasks, tasks, parseTasks, aiMetadataJobs, taskEvents,
     products, flexibleTags, aiRules,
     aiRuleSettings, aiConfig, mineruConfig, minioConfig, settings,
   } = req.body;
@@ -697,6 +767,15 @@ app.post('/bulk-restore', (req, res) => {
   }
   for (const t of (tasks || [])) {
     if (!dbCache.tasks[String(t.id)]) dbCache.tasks[String(t.id)] = t;
+  }
+  for (const t of (parseTasks || [])) {
+    if (!dbCache.parseTasks[String(t.id)]) dbCache.parseTasks[String(t.id)] = t;
+  }
+  for (const j of (aiMetadataJobs || [])) {
+    if (!dbCache.aiMetadataJobs[String(j.id)]) dbCache.aiMetadataJobs[String(j.id)] = j;
+  }
+  for (const e of (taskEvents || [])) {
+    if (!dbCache.taskEvents[String(e.id)]) dbCache.taskEvents[String(e.id)] = e;
   }
   for (const p of (products || [])) {
     if (!dbCache.products[String(p.id)]) dbCache.products[String(p.id)] = p;

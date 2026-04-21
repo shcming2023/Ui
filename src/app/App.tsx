@@ -10,6 +10,7 @@ import { SettingsPage } from './pages/SettingsPage';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { LatexToolPage } from './pages/backup/LatexToolPage';
 import { WorkspacePage } from './pages/WorkspacePage';
+import { TaskManagementPage } from './pages/TaskManagementPage';
 
 export default function App() {
   return (
@@ -24,6 +25,7 @@ export default function App() {
 
                 {/* ── 子系统一：EduAsset CMS ─────────────────────── */}
                 <Route path="/workspace" element={<WorkspacePage />} />
+                <Route path="/tasks" element={<TaskManagementPage />} />
                 <Route path="/source-materials" element={<Navigate to="/workspace" replace />} />
                 <Route path="/legacy/source-materials" element={<SourceMaterialsPage />} />
                 {/* 资产详情：解析结果查看、字段编辑、AI 规则配置 */}

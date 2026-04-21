@@ -1939,6 +1939,81 @@ app.post('/parse/local-mineru', upload.single('file'), async (req, res) => {
   }
 });
 
+// ─── 接口：POST /tasks ────────────────────────────────────────
+// 统一入口：上传文件，创建 Material 与 ParseTask 并在 db-server 落库
+// 根据约束，现阶段不接入真实长耗时 MinerU worker，仅完成落库及信息保存
+app.post('/tasks', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: '缺少文件字段 `file`' });
+    }
+
+    const materialId = `mat-${Date.now()}`;
+    const taskId = `task-${Date.now()}`;
+    
+    // 1. 上传文件到 MinIO
+    const bucket = getMinioBucket();
+    const objectName = `originals/${materialId}/${req.file.originalname}`;
+    await streamUploadToMinIO(req.file, bucket, objectName, req.file.mimetype);
+
+    // 2. 创建 material
+    const material = {
+      id: materialId,
+      status: 'pending',
+      fileName: req.file.originalname,
+      title: req.file.originalname.replace(/\.[^/.]+$/, ''),
+      fileSize: req.file.size,
+      mimeType: req.file.mimetype,
+      createTime: Date.now(),
+      updateTime: Date.now(),
+      metadata: {
+        provider: 'minio',
+        bucket,
+        objectName,
+      }
+    };
+    
+    const dbMatBody = JSON.stringify(material);
+    const dbMatResp = await fetch(`${DB_BASE_URL}/materials`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: dbMatBody
+    });
+    if (!dbMatResp.ok) throw new Error(`同步 Material 到 db-server 失败`);
+
+    // 3. 创建 ParseTask
+    const optionsSnapshot = { ...req.body };
+    const parseTask = {
+      id: taskId,
+      materialId: materialId,
+      engine: optionsSnapshot.backend || 'pipeline', 
+      stage: 'upload',
+      state: 'pending',
+      progress: 0,
+      message: '任务已创建待处理',
+      optionsSnapshot: optionsSnapshot,
+      createdAt: new Date().toISOString()
+    };
+    
+    const dbTaskBody = JSON.stringify(parseTask);
+    const dbTaskResp = await fetch(`${DB_BASE_URL}/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: dbTaskBody
+    });
+    const dbTaskResult = await dbTaskResp.json().catch(() => null);
+    if (!dbTaskResp.ok) throw new Error(`同步 ParseTask 到 db-server 失败: ${dbTaskResult?.error || 'unknown'}`);
+
+    res.json({ ok: true, taskId, materialId });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[upload-server] /tasks failed:', message);
+    res.status(500).json({ error: message });
+  } finally {
+    cleanupTempFile(req.file);
+  }
+});
+
 // ─── 接口：POST /parse/analyze ────────────────────────────────
 // 读取 MinIO 中的 full.md，调用大模型 API，提取结构化元数据
 // Body: { markdownObjectName?, markdownUrl?, markdownContent?, materialId,
