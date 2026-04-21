@@ -42,6 +42,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { registerConsistencyRoutes } from './lib/consistency-routes.mjs';
+import { ParseTaskWorker } from './services/queue/task-worker.mjs';
 
 const app = express();
 const port = Number(process.env.UPLOAD_PORT || 8788);
@@ -3276,6 +3277,8 @@ app.use((err, req, res, _next) => {
   if (!res.headersSent) res.status(status).json({ error: message, requestId });
 });
 
+const worker = new ParseTaskWorker();
+
 const server = app.listen(port, async () => {
   console.log(`[upload-server] listening on http://localhost:${port}`);
   await loadPersistedConfig();
@@ -3283,12 +3286,19 @@ const server = app.listen(port, async () => {
   if (getStorageBackend() === 'minio') {
     console.log(`[upload-server] MinIO: ${minioState.endpoint}:${minioState.port}`);
   }
+  
+  // 启动 ParseTask Worker
+  worker.start();
 });
 
 // ─── 优雅停机 ─────────────────────────────────────────────────
 
 async function gracefulShutdown(signal) {
   console.log(`[upload-server] Received ${signal}, shutting down...`);
+  
+  // 停止 Worker
+  if (worker) worker.stop();
+
   server.close(() => {
     console.log(`[upload-server] Server closed after ${signal}.`);
     process.exit(0);

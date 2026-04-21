@@ -100,15 +100,27 @@ export function TaskManagementPage() {
                     </td>
                     <td className="px-6 py-4 text-slate-600">{t.stage || '—'}</td>
                     <td className="px-6 py-4">
-                      <span className={`inline-flex items-center px-2 py-1 flex-shrink-0 text-xs font-medium rounded-full ${
-                        t.state === 'success' ? 'bg-green-100 text-green-700' :
-                        t.state === 'failed' ? 'bg-red-100 text-red-700' :
-                        'bg-blue-100 text-blue-700'
-                      }`}>
-                        {t.state || 'pending'}
-                      </span>
+                      <div className="flex flex-col gap-1.5">
+                        <span className={`inline-flex items-center w-fit px-2 py-1 flex-shrink-0 text-xs font-medium rounded-full ${
+                          t.state === 'success' || t.state === 'ai-pending' ? 'bg-green-100 text-green-700' :
+                          t.state === 'failed' ? 'bg-red-100 text-red-700' :
+                          t.state === 'running' || t.state === 'result-store' ? 'bg-blue-100 text-blue-700 border border-blue-200 animate-pulse' :
+                          'bg-slate-100 text-slate-700'
+                        }`}>
+                          {t.state || 'pending'}
+                        </span>
+                        {/* 进度条：仅在处理中显示 */}
+                        {(t.state === 'running' || t.state === 'result-store') && (
+                          <div className="w-24 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                            <div 
+                              className="h-full bg-blue-500 transition-all duration-500" 
+                              style={{ width: `${t.progress || 0}%` }}
+                            />
+                          </div>
+                        )}
+                      </div>
                       {t.message && (
-                        <p className="text-[10px] text-slate-400 mt-1 max-w-[200px] truncate" title={t.message}>
+                        <p className="text-[10px] text-slate-500 mt-1.5 max-w-[200px] break-words leading-relaxed" title={t.message}>
                           {t.message}
                         </p>
                       )}
