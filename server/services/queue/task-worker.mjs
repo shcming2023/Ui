@@ -5,11 +5,13 @@
  * 1. 模拟执行需明确标记 "worker skeleton"
  * 2. 内存锁防重复处理
  * 3. 常量化轮询与延迟配置
+ * 4. 解析完成后自动创建 AI Metadata Job（含去重保护）
  */
 
 import { getAllTasks, updateTask } from '../tasks/task-client.mjs';
 import { logTaskEvent } from '../logging/task-events.mjs';
 import { processWithLocalMinerU } from '../mineru/local-adapter.mjs';
+import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
 
 // 约束 3: 集中配置常量
 const POLL_INTERVAL_MS = 10000; // 10秒检查一次
@@ -105,6 +107,9 @@ export class ParseTaskWorker {
           completedAt: new Date().toISOString()
         }, 'worker-completed');
 
+        // ── 解析成功后自动创建 AI Metadata Job ──────────────────
+        await this.tryCreateAiJob(task, materialInfo.metadata?.markdownObjectName);
+
       } else {
         // 1. 进入 running 状态 (模拟过程)
         await this.transition(task, {
@@ -142,6 +147,9 @@ export class ParseTaskWorker {
           message: '[worker skeleton] 解析完成（模拟），等待 AI 元数据识别',
           completedAt: new Date().toISOString()
         }, 'worker-completed');
+
+        // ── 解析成功后自动创建 AI Metadata Job ──────────────────
+        await this.tryCreateAiJob(task);
       }
 
     } catch (error) {
@@ -153,6 +161,65 @@ export class ParseTaskWorker {
       }, 'worker-failed', 'error');
     } finally {
       processingMap.delete(task.id);
+    }
+  }
+
+  /**
+   * 尝试为完成的 ParseTask 创建 AI Metadata Job。
+   * 创建失败不伪装为解析失败，仅记录 warning 事件。
+   * @param {object} task - 当前 ParseTask
+   * @param {string} [markdownObjectName] - Markdown 产物的 MinIO objectName（可选）
+   */
+  async tryCreateAiJob(task, markdownObjectName) {
+    try {
+      const result = await createAiMetadataJob({
+        parseTaskId: task.id,
+        materialId: task.materialId || null,
+        inputMarkdownObjectName: markdownObjectName || null,
+      });
+
+      if (result.created) {
+        // 创建成功：写入 ai-job-created 事件
+        await logTaskEvent({
+          taskId: task.id,
+          taskType: 'parse',
+          level: 'info',
+          event: 'ai-job-created',
+          message: `AI Metadata Job 已创建: ${result.jobId}`,
+          payload: { aiJobId: result.jobId },
+        });
+      } else if (result.reason === 'duplicate') {
+        // 去重跳过：不算错误，记录 info
+        await logTaskEvent({
+          taskId: task.id,
+          taskType: 'parse',
+          level: 'info',
+          event: 'ai-job-skipped',
+          message: `AI Metadata Job 已存在，跳过创建 (existingJobId=${result.jobId})`,
+          payload: { existingJobId: result.jobId },
+        });
+      } else {
+        // 创建失败：记录 warning（不伪装为解析失败）
+        await logTaskEvent({
+          taskId: task.id,
+          taskType: 'parse',
+          level: 'warn',
+          event: 'ai-job-create-failed',
+          message: `AI Metadata Job 创建失败: ${result.reason}`,
+          payload: { reason: result.reason },
+        });
+      }
+    } catch (error) {
+      // 兜底：创建过程本身异常，只记日志不影响 ParseTask 状态
+      console.warn(`[task-worker] tryCreateAiJob unexpected error: ${error.message}`);
+      await logTaskEvent({
+        taskId: task.id,
+        taskType: 'parse',
+        level: 'warn',
+        event: 'ai-job-create-failed',
+        message: `AI Metadata Job 创建异常: ${error.message}`,
+        payload: { error: error.message },
+      });
     }
   }
 

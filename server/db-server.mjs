@@ -591,8 +591,21 @@ app.post('/task-events', (req, res) => {
 
 // ─── AI Metadata Jobs ─────────────────────────────────────────
 
-app.get('/ai-metadata-jobs', (_req, res) => {
-  res.json(Object.values(dbCache.aiMetadataJobs));
+app.get('/ai-metadata-jobs', (req, res) => {
+  const parseTaskId = req.query.parseTaskId;
+  const list = Object.values(dbCache.aiMetadataJobs);
+  if (parseTaskId) {
+    res.json(list.filter(j => String(j.parseTaskId) === String(parseTaskId)));
+  } else {
+    res.json(list);
+  }
+});
+
+app.get('/ai-metadata-jobs/:id', (req, res) => {
+  const id = req.params.id;
+  const item = dbCache.aiMetadataJobs[id];
+  if (!item) { res.status(404).json({ error: 'not found' }); return; }
+  res.json(item);
 });
 
 app.post('/ai-metadata-jobs', (req, res) => {
