@@ -1,31 +1,38 @@
 /**
- * metadata-worker.mjs - AI 元数据识别任务执行器骨架
+ * metadata-worker.mjs - AI 元数据识别任务执行器
  * 
- * 约束要求：
- * 1. 模拟执行需明确标记 "[ai worker skeleton]"
- * 2. 内存锁防重复处理
- * 3. 结果符合 PRD 10.5.3 基础 schema
+ * 职责：
+ * 1. 扫描 pending 状态的 AI Metadata Jobs
+ * 2. 从 MinIO 获取解析产物 Markdown 内容
+ * 3. 选取合适的 Provider (Ollama/OpenAI) 进行元数据提取
+ * 4. 解析结果并推进状态到 review-pending 或 confirmed
+ * 5. 处理 Fallback 与降级 logic
  */
 
 import { getAllJobs, updateJob } from './metadata-job-client.mjs';
+import { getTaskById } from '../tasks/task-client.mjs';
 import { logTaskEvent } from '../logging/task-events.mjs';
+import { getSettings } from '../settings/settings-client.mjs';
 
-const POLL_INTERVAL_MS = 10000; // 10秒检查一次
-const SIMULATED_DELAY_MS = 5000; // 每个阶段模拟耗时 5秒
+import { OllamaProvider } from './providers/ollama.mjs';
+import { OpenAiCompatibleProvider } from './providers/openai-compatible.mjs';
+
+const POLL_INTERVAL_MS = 10000;
 
 // 内存队列锁
 const processingMap = new Set();
 
 export class AiMetadataWorker {
-  constructor() {
+  constructor(minioContext = null) {
     this.timer = null;
     this.isRunning = false;
+    this.minioContext = minioContext;
   }
 
   start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    console.log('[ai-worker] AI Metadata Worker started (skeleton mode)');
+    console.log('[ai-worker] AI Metadata Worker started');
     this.tick();
   }
 
@@ -57,97 +64,261 @@ export class AiMetadataWorker {
     }
   }
 
+  /**
+   * 核心处理逻辑
+   */
   async processJob(job) {
     processingMap.add(job.id);
-    console.log(`[ai-worker] Picked up AI job: ${job.id} (parseTask=${job.parseTaskId})`);
+    const startTime = Date.now();
+    console.log(`[ai-worker] Picking up job: ${job.id} (parseTask=${job.parseTaskId})`);
 
     try {
-      // 1. 进入 running 状态
+      // 1. 获取全局设置
+      const settings = await getSettings();
+      const aiSettings = settings.ai || {};
+      
+      // 降级检查：未启用 AI
+      if (aiSettings.aiEnabled === false) {
+        return await this.degradeToSkeleton(job, 'AI 功能已从控制台关闭，降级为骨架模拟');
+      }
+
+      // 2. 获取 Provider 实例
+      const providerId = aiSettings.aiProviderId || 'ollama'; // 默认为 ollama
+      let provider = this.createProvider(providerId, aiSettings);
+
+      // 3. 获取 ParseTask 信息与 Markdown 内容
+      const parseTask = await getTaskById(job.parseTaskId);
+      const markdownObjectName = parseTask?.metadata?.markdownObjectName || job.inputMarkdownObjectName;
+      
+      if (!markdownObjectName || !this.minioContext) {
+        return await this.degradeToSkeleton(job, '未找到 Markdown 产物或存储上下文不可用，降级为骨架模拟');
+      }
+
+      let markdownContent = '';
+      try {
+        const stream = await this.minioContext.getFileStream(markdownObjectName);
+        markdownContent = await this.streamToString(stream);
+      } catch (err) {
+        return await this.degradeToSkeleton(job, `拉取 Markdown 内容失败: ${err.message}，降级为骨架模拟`);
+      }
+
+      if (!markdownContent.trim()) {
+        throw new Error('Markdown 内容为空，无法提取元数据');
+      }
+
+      // 4. 内容截断处理 (根据 PRD 10.5.5)
+      const MAX_CHARS = 32000; // 约 8000 tokens
+      let isTruncated = false;
+      const originalLength = markdownContent.length;
+      if (originalLength > MAX_CHARS) {
+        markdownContent = markdownContent.slice(0, MAX_CHARS);
+        isTruncated = true;
+        await logTaskEvent({
+          taskId: job.parseTaskId,
+          event: 'ai-content-truncated',
+          level: 'info',
+          message: `Markdown 内容过长已截断 (${originalLength} -> ${MAX_CHARS} 字符)`,
+          payload: { originalLength, truncatedLength: MAX_CHARS }
+        });
+      }
+
+      // 5. 执行 AI 识别
       await this.transition(job, {
         state: 'running',
-        progress: 10,
-        message: '[ai worker skeleton] 正在拉取 Markdown 内容并初始化 AI 模型...'
-      }, 'ai-worker-picked');
+        progress: 20,
+        message: `正在使用 ${providerId} (${provider.model}) 进行识别...`
+      }, 'ai-provider-called', 'info', { provider: providerId, model: provider.model, inputLength: markdownContent.length });
 
-      await this.sleep(SIMULATED_DELAY_MS);
+      let aiResponse;
+      try {
+        aiResponse = await this.executeWithFallback(provider, markdownContent, aiSettings);
+      } catch (err) {
+        console.error(`[ai-worker] Job ${job.id} failed after attempts: ${err.message}`);
+        // 如果所有 provider 都失败，尝试降级到模拟
+        return await this.degradeToSkeleton(job, `AI Provider 调用全部失败: ${err.message}，自动降级为模拟结果完成链路`);
+      }
 
-      // 2. 模拟分析进度
+      // 6. 结果后处理与置信度校准
+      const result = aiResponse.result;
+      const confidence = result.confidence || aiResponse.usage?.confidence || 0;
+      
+      // 判断是否需要人工审核
+      const threshold = Number(aiSettings.confidenceThreshold || 80);
+      const isLowConfidence = confidence < threshold;
+      const missingKeyFields = !result.subject || !result.grade || !result.materialType;
+      const requireAllReview = aiSettings.requireAllReview === true;
+      
+      const needsReview = isLowConfidence || missingKeyFields || requireAllReview || aiResponse.fallbackOccurred;
+
+      // 7. 完成任务
+      const finalState = needsReview ? 'review-pending' : 'confirmed';
+      const duration = Date.now() - startTime;
+
       await this.transition(job, {
-        progress: 50,
-        message: '[ai worker skeleton] 正在解析题目结构与提取元数据...'
-      }, 'ai-progress-update');
-
-      await this.sleep(SIMULATED_DELAY_MS);
-
-      // 3. 构建模拟结果 (PRD 10.5.3)
-      const simulatedResult = {
-        title: "模拟试卷：2026年八年级数学期中测试",
-        subject: "数学",
-        grade: "G8",
-        semester: "上册",
-        materialType: "试卷",
-        language: "中文",
-        country: "中国",
-        curriculum: "人教版",
-        publisher: "模拟出版社",
-        examType: "期中考试",
-        difficulty: "中等",
-        knowledgePoints: ["一次函数", "几何证明", "全等三角形"],
-        tags: ["初二", "数学", "期中", "模拟"],
-        summary: "[ai worker skeleton] 本文档是一份八年级数学期中考试模拟卷，涵盖了函数基础与几何证明核心考点。",
-        confidence: 95,
-        fieldConfidence: {
-          subject: 99,
-          grade: 98,
-          materialType: 92
-        },
-        needsReview: false,
-        warnings: []
-      };
-
-      // 4. 完成任务进入 review-pending (或者根据 needsReview 进入相应状态)
-      await this.transition(job, {
-        state: 'review-pending',
+        state: finalState,
         progress: 100,
-        message: '[ai worker skeleton] AI 元数据识别完成，等待人工拉回确认',
-        result: simulatedResult,
-        confidence: simulatedResult.confidence,
-        needsReview: simulatedResult.needsReview,
+        message: `AI 识别完成 (${duration}ms)${aiResponse.fallbackOccurred ? ' [Fallback已发生]' : ''}`,
+        result,
+        confidence,
+        needsReview,
+        providerId: aiResponse.provider,
+        model: aiResponse.model,
         updatedAt: new Date().toISOString(),
         completedAt: new Date().toISOString()
-      }, 'ai-worker-completed');
+      }, 'ai-provider-success', 'info', { 
+        duration, 
+        confidence, 
+        needsReview, 
+        fallback: !!aiResponse.fallbackOccurred 
+      });
 
     } catch (error) {
-      console.error(`[ai-worker] Job ${job.id} failed: ${error.message}`);
+      console.error(`[ai-worker] Job ${job.id} unexpected error: ${error.message}`);
       await this.transition(job, {
         state: 'failed',
         errorMessage: error.message,
-        message: `[ai worker skeleton] 执行失败: ${error.message}`
-      }, 'ai-worker-failed', 'error');
+        message: `AI 识别异常: ${error.message}`
+      }, 'ai-provider-failed', 'error', { error: error.message });
     } finally {
       processingMap.delete(job.id);
     }
   }
 
-  async transition(job, update, eventName, level = 'info') {
+  /**
+   * 降级执行：返回模拟结果
+   */
+  async degradeToSkeleton(job, reason) {
+    console.warn(`[ai-worker] Degrading job ${job.id}: ${reason}`);
+    
+    await logTaskEvent({
+      taskId: job.parseTaskId,
+      event: 'ai-skeleton-fallback',
+      level: 'warn',
+      message: reason,
+      payload: { aiJobId: job.id }
+    });
+
+    const simulatedResult = {
+      title: "模拟试卷 (降级模式)",
+      subject: "未知",
+      grade: "未知",
+      materialType: "其他",
+      summary: `[ai skeleton fallback] 由于 "${reason}"，系统使用了降级模拟结果。`,
+      confidence: 50,
+      needsReview: true,
+      warnings: ["系统已降级为模拟模式"]
+    };
+
+    await this.transition(job, {
+      state: 'review-pending',
+      progress: 100,
+      message: `[降级屏蔽] ${reason}`,
+      result: simulatedResult,
+      confidence: 50,
+      needsReview: true,
+      providerId: 'skeleton',
+      updatedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString()
+    }, 'ai-worker-completed');
+  }
+
+  /**
+   * 执行 AI 条目识别并支持 Fallback
+   */
+  async executeWithFallback(mainProvider, markdown, aiSettings) {
+    const providersToTry = [mainProvider];
+    
+    // 如果配置了 fallback，可以加入列表（此处简化逻辑，如果主 provider 失败，尝试 openai-compatible 作为垫背）
+    if (mainProvider.id === 'ollama' && aiSettings.openaiApiKey) {
+      providersToTry.push(this.createProvider('openai-compatible', aiSettings));
+    }
+
+    let lastError;
+    for (let i = 0; i < providersToTry.length; i++) {
+        const provider = providersToTry[i];
+        try {
+            const systemPrompt = aiSettings.systemPrompt || this.getDefaultPrompt();
+            const resp = await provider.extractMetadata(markdown, { systemPrompt });
+            if (i > 0) resp.fallbackOccurred = true;
+            return resp;
+        } catch (err) {
+            lastError = err;
+            console.warn(`[ai-worker] Provider ${provider.id} failed: ${err.message}`);
+            if (i < providersToTry.length - 1) {
+                await logTaskEvent({
+                   taskId: 'system', // 此处记录系统级别警告
+                   event: 'ai-provider-fallback',
+                   level: 'warn',
+                   message: `Provider ${provider.id} 失败，正在尝试下一个: ${providersToTry[i+1].id}`
+                });
+            }
+        }
+    }
+    throw lastError;
+  }
+
+  createProvider(id, aiSettings) {
+    if (id === 'ollama') {
+      return new OllamaProvider({
+        baseUrl: aiSettings.ollamaBaseUrl,
+        model: aiSettings.ollamaModel,
+        timeoutMs: 120000
+      });
+    }
+    if (id === 'openai-compatible') {
+      return new OpenAiCompatibleProvider({
+        baseUrl: aiSettings.openaiBaseUrl,
+        model: aiSettings.openaiModel,
+        apiKey: aiSettings.openaiApiKey,
+        timeoutMs: 120000
+      });
+    }
+    // 兜底返回 Ollama
+    return new OllamaProvider({ baseUrl: 'http://localhost:11434' });
+  }
+
+  getDefaultPrompt() {
+    return `你是一个专业的教育资源元数据提取助手。你的任务是从提供的 Markdown 文本中提取结构化信息。
+请严格仅返回 JSON 格式，不要包含任何解释性文本或 Markdown 代码块标识。
+
+JSON 结构需包含以下字段（符合 PRD 10.5.3）：
+- title (string): 资源标题
+- subject (string): 学科（如：数学, 语文, 英语, 物理, 化学等）
+- grade (string): 年级标识（如：G1-G12, K1-K3, Y1-Y13）
+- semester (string): 学期（上册, 下册, 全一册）
+- materialType (string): 资料类型（教材, 试卷, 讲义, 练习册, 课件, 视频等）
+- language (string): 语种（中文, 英文等）
+- curriculum (string): 课程体系/版本（如：人教版, 北师大版, IB, A-Level）
+- tags (array of strings): 3-8个关键词标签
+- summary (string): 核心内容简述（不超过200字）
+- confidence (number): 0-100 的整体识别置信度
+- fieldConfidence (object): 各核心字段的置信度得分
+- needsReview (boolean): 建议人工复核
+
+无法判断的字段请填入空字符串或 "unknown"；不要编造信息。`;
+  }
+
+  async transition(job, update, eventName, level = 'info', payload = {}) {
     const success = await updateJob(job.id, update);
     if (success) {
-      // 写入事件日志，注意日志的 taskId 应该是关联的 parseTaskId，以便在详情页展示
       await logTaskEvent({
         taskId: job.parseTaskId,
-        taskType: 'parse', // 解析任务流中的事件
+        taskType: 'parse',
         event: eventName,
         level,
-        message: update.message || `AI Job ${job.id} status changed to ${update.state}`,
+        message: update.message || `AI Job status changed to ${update.state}`,
         payload: {
           aiJobId: job.id,
-          ...update
+          ...update,
+          ...payload
         }
       });
     }
   }
 
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  async streamToString(stream) {
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    return Buffer.concat(chunks).toString('utf-8');
   }
 }

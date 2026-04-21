@@ -3277,10 +3277,14 @@ app.use((err, req, res, _next) => {
   console.error(`[upload-server] unhandled route error [${requestId}] ${req.method} ${req.path}:`, message);
   if (!res.headersSent) res.status(status).json({ error: message, requestId });
 });
-const worker = new ParseTaskWorker({
+const minioContext = {
   getFileStream: async (objectName) => {
     return await getMinioClient().getObject(getMinioBucket(), objectName);
-  },
+  }
+};
+
+const worker = new ParseTaskWorker({
+  ...minioContext,
   saveMarkdown: async (objectName, markdown) => {
     const bucket = getParsedBucket();
     const client = getMinioClient();
@@ -3290,7 +3294,7 @@ const worker = new ParseTaskWorker({
   }
 });
 
-const aiWorker = new AiMetadataWorker();
+const aiWorker = new AiMetadataWorker(minioContext);
 
 const server = app.listen(port, async () => {
   console.log(`[upload-server] listening on http://localhost:${port}`);
