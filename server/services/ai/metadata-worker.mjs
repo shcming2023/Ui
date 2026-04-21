@@ -76,16 +76,41 @@ export class AiMetadataWorker {
       // 1. 获取全局设置
       const settings = await getSettings();
       // 优先读取 aiConfig，兼容旧的 ai
-      const aiSettings = settings.aiConfig || settings.ai || {};
-      
+      const rawAiConfig = settings.aiConfig || settings.ai || {};
+
       // 降级检查：未启用 AI
-      if (aiSettings.aiEnabled === false) {
+      if (rawAiConfig.aiEnabled === false) {
         return await this.degradeToSkeleton(job, 'AI 功能已从控制台关闭，降级为骨架模拟');
       }
 
-      // 2. 获取 Provider 实例
-      // 优先从 aiSettings.providerId 读取（前端存入 aiConfig 时可能用这个字段）
-      const providerId = aiSettings.aiProviderId || aiSettings.providerId || 'ollama'; 
+      // 2. 确定 Provider 配置 (优先选择 providers 数组中启用且优先级最高的)
+      let aiSettings = {};
+      let providerId = 'ollama';
+
+      if (Array.isArray(rawAiConfig.providers) && rawAiConfig.providers.length > 0) {
+        const sortedEnabled = rawAiConfig.providers
+          .filter(p => p.enabled !== false)
+          .sort((a, b) => (a.priority ?? 999) - (b.priority ?? 999));
+        
+        if (sortedEnabled.length > 0) {
+          const chosen = sortedEnabled[0];
+          providerId = chosen.provider || chosen.id || 'ollama';
+          // 规范化字段：将 chosen 的字段映射到 aiSettings 中
+          aiSettings = {
+            ...rawAiConfig, // 继承全局配置 (如 confidenceThreshold)
+            ...chosen,
+            baseUrl: chosen.apiEndpoint || chosen.baseUrl,
+            timeoutMs: this.normalizeTimeout(chosen.timeout || rawAiConfig.timeout)
+          };
+        } else {
+          aiSettings = { ...rawAiConfig, timeoutMs: this.normalizeTimeout(rawAiConfig.timeout) };
+          providerId = aiSettings.aiProviderId || aiSettings.providerId || 'ollama';
+        }
+      } else {
+        aiSettings = { ...rawAiConfig, timeoutMs: this.normalizeTimeout(rawAiConfig.timeout) };
+        providerId = aiSettings.aiProviderId || aiSettings.providerId || 'ollama';
+      }
+
       let provider = this.createProvider(providerId, aiSettings);
 
       // 3. 获取 ParseTask 信息与 Markdown 内容
@@ -260,11 +285,20 @@ export class AiMetadataWorker {
   }
 
   createProvider(id, aiSettings) {
+    let baseUrl = aiSettings.ollamaBaseUrl || aiSettings.baseUrl || 'http://host.docker.internal:11434';
+    
+    // 规范化 Ollama 端点：如果包含了 v1 路径，则剥离，因为 OllamaProvider 自带 /api/chat
+    if (id === 'ollama' && baseUrl.includes('/v1')) {
+      baseUrl = baseUrl.split('/v1')[0];
+    }
+
+    const timeoutMs = aiSettings.timeoutMs || 120000;
+
     if (id === 'ollama') {
       return new OllamaProvider({
-        baseUrl: aiSettings.ollamaBaseUrl || aiSettings.baseUrl || 'http://host.docker.internal:11434',
+        baseUrl,
         model: aiSettings.ollamaModel || aiSettings.model || 'qwen3.5:9b',
-        timeoutMs: Number(aiSettings.timeout || 120000)
+        timeoutMs
       });
     }
     if (id === 'openai-compatible') {
@@ -272,11 +306,21 @@ export class AiMetadataWorker {
         baseUrl: aiSettings.openaiBaseUrl || aiSettings.baseUrl,
         model: aiSettings.openaiModel || aiSettings.model,
         apiKey: aiSettings.openaiApiKey || aiSettings.apiKey,
-        timeoutMs: Number(aiSettings.timeout || 120000)
+        timeoutMs
       });
     }
     // 兜底返回 Ollama (Docker 友好地址)
     return new OllamaProvider({ baseUrl: 'http://host.docker.internal:11434' });
+  }
+
+  /**
+   * 规范化超时时间：如果数值过小（<= 3600），视作秒，转为毫秒
+   */
+  normalizeTimeout(val) {
+    const n = Number(val);
+    if (!n || isNaN(n)) return 120000;
+    if (n <= 3600) return n * 1000; // 秒转毫秒
+    return n;
   }
 
   getDefaultPrompt() {
