@@ -3058,15 +3058,26 @@ app.post('/delete-material', async (req, res) => {
       }
       const rawBucket = getMinioBucket();
       const parsedBucket = getParsedBucket();
-      const [originals, parsed] = await Promise.all([
-        listAllObjects(rawBucket, `originals/${id}/`),
-        listAllObjects(parsedBucket, `parsed/${id}/`),
-      ]);
-      await Promise.all([
-        ...originals.map((o) => getMinioClient().removeObject(rawBucket, o.name)),
-        ...parsed.map((o) => getMinioClient().removeObject(parsedBucket, o.name)),
-      ]);
-      results.push({ id, originals: originals.length, parsed: parsed.length });
+      const objectName = m.metadata?.objectName;
+
+      if (objectName) {
+        await getMinioClient().removeObject(rawBucket, objectName);
+        const parsed = await listAllObjects(parsedBucket, `parsed/${id}/`);
+        await Promise.all([
+          ...parsed.map((o) => getMinioClient().removeObject(parsedBucket, o.name)),
+        ]);
+        results.push({ id, originals: 1, parsed: parsed.length });
+      } else {
+        const [originals, parsed] = await Promise.all([
+          listAllObjects(rawBucket, `originals/${id}/`),
+          listAllObjects(parsedBucket, `parsed/${id}/`),
+        ]);
+        await Promise.all([
+          ...originals.map((o) => getMinioClient().removeObject(rawBucket, o.name)),
+          ...parsed.map((o) => getMinioClient().removeObject(parsedBucket, o.name)),
+        ]);
+        results.push({ id, originals: originals.length, parsed: parsed.length });
+      }
     } catch (err) {
       errors.push({ id, error: err.message });
     }
