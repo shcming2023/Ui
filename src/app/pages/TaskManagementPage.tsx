@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 // Card component from shadcn UI not present; using native Tailwind divs
 import { Loader2, RefreshCw, FileText, Play, Download, Trash, Eye } from 'lucide-react';
 import { toast } from 'sonner';
@@ -17,6 +18,7 @@ interface ParseTask {
 export function TaskManagementPage() {
   const [tasks, setTasks] = useState<ParseTask[]>([]);
   const [loading, setLoading] = useState(true);
+  const navigate = useNavigate();
 
   const fetchTasks = async () => {
     setLoading(true);
@@ -88,10 +90,14 @@ export function TaskManagementPage() {
                 tasks.map((t) => (
                   <tr key={t.id} className="bg-white hover:bg-slate-50/50 transition-colors">
                     <td className="px-6 py-4 font-medium text-slate-900">
-                      <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => navigate(`/tasks/${encodeURIComponent(t.id)}`)}
+                        className="flex items-center gap-2 hover:text-blue-600 transition-colors text-left"
+                        title="查看详情"
+                      >
                         <FileText className="w-4 h-4 text-slate-400" />
                         {t.id}
-                      </div>
+                      </button>
                     </td>
                     <td className="px-6 py-4">
                       <span className="inline-flex items-center px-2 py-1 rounded bg-slate-100 text-slate-600 text-xs font-medium">
@@ -130,7 +136,7 @@ export function TaskManagementPage() {
                     </td>
                     <td className="px-6 py-4 text-right">
                       <div className="flex justify-end gap-2">
-                        <button className="p-1.5 text-slate-400 hover:text-blue-600 rounded transition-colors" title="查看详情">
+                        <button onClick={() => navigate(`/tasks/${encodeURIComponent(t.id)}`)} className="p-1.5 text-slate-400 hover:text-blue-600 rounded transition-colors" title="查看详情">
                           <Eye className="w-4 h-4" />
                         </button>
                         <button className="p-1.5 text-slate-400 hover:text-green-600 rounded transition-colors" title="下载结果">
