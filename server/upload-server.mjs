@@ -3279,7 +3279,8 @@ app.use((err, req, res, _next) => {
 });
 const minioContext = {
   getFileStream: async (objectName) => {
-    return await getMinioClient().getObject(getMinioBucket(), objectName);
+    const bucket = resolveBucketForObject(objectName);
+    return await getMinioClient().getObject(bucket, objectName);
   }
 };
 

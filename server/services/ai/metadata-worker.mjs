@@ -75,7 +75,8 @@ export class AiMetadataWorker {
     try {
       // 1. 获取全局设置
       const settings = await getSettings();
-      const aiSettings = settings.ai || {};
+      // 优先读取 aiConfig，兼容旧的 ai
+      const aiSettings = settings.aiConfig || settings.ai || {};
       
       // 降级检查：未启用 AI
       if (aiSettings.aiEnabled === false) {
@@ -83,7 +84,8 @@ export class AiMetadataWorker {
       }
 
       // 2. 获取 Provider 实例
-      const providerId = aiSettings.aiProviderId || 'ollama'; // 默认为 ollama
+      // 优先从 aiSettings.providerId 读取（前端存入 aiConfig 时可能用这个字段）
+      const providerId = aiSettings.aiProviderId || aiSettings.providerId || 'ollama'; 
       let provider = this.createProvider(providerId, aiSettings);
 
       // 3. 获取 ParseTask 信息与 Markdown 内容
@@ -260,21 +262,21 @@ export class AiMetadataWorker {
   createProvider(id, aiSettings) {
     if (id === 'ollama') {
       return new OllamaProvider({
-        baseUrl: aiSettings.ollamaBaseUrl,
-        model: aiSettings.ollamaModel,
-        timeoutMs: 120000
+        baseUrl: aiSettings.ollamaBaseUrl || aiSettings.baseUrl || 'http://host.docker.internal:11434',
+        model: aiSettings.ollamaModel || aiSettings.model || 'qwen3.5:9b',
+        timeoutMs: Number(aiSettings.timeout || 120000)
       });
     }
     if (id === 'openai-compatible') {
       return new OpenAiCompatibleProvider({
-        baseUrl: aiSettings.openaiBaseUrl,
-        model: aiSettings.openaiModel,
-        apiKey: aiSettings.openaiApiKey,
-        timeoutMs: 120000
+        baseUrl: aiSettings.openaiBaseUrl || aiSettings.baseUrl,
+        model: aiSettings.openaiModel || aiSettings.model,
+        apiKey: aiSettings.openaiApiKey || aiSettings.apiKey,
+        timeoutMs: Number(aiSettings.timeout || 120000)
       });
     }
-    // 兜底返回 Ollama
-    return new OllamaProvider({ baseUrl: 'http://localhost:11434' });
+    // 兜底返回 Ollama (Docker 友好地址)
+    return new OllamaProvider({ baseUrl: 'http://host.docker.internal:11434' });
   }
 
   getDefaultPrompt() {
