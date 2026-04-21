@@ -9,6 +9,7 @@
 
 import { getAllTasks, updateTask } from '../tasks/task-client.mjs';
 import { logTaskEvent } from '../logging/task-events.mjs';
+import { processWithLocalMinerU } from '../mineru/local-adapter.mjs';
 
 // 约束 3: 集中配置常量
 const POLL_INTERVAL_MS = 10000; // 10秒检查一次
@@ -18,9 +19,10 @@ const SIMULATED_DELAY_MS = 5000; // 每个阶段模拟耗时 5秒
 const processingMap = new Set();
 
 export class ParseTaskWorker {
-  constructor() {
+  constructor(minioContext = null) {
     this.timer = null;
     this.isRunning = false;
+    this.minioContext = minioContext;
   }
 
   start() {
@@ -65,42 +67,81 @@ export class ParseTaskWorker {
     console.log(`[task-worker] Picked up task: ${task.id} (worker skeleton)`);
 
     try {
-      // 1. 进入 running 状态 (模拟过程)
-      await this.transition(task, {
-        stage: 'process',
-        state: 'running',
-        progress: 10,
-        message: '[worker skeleton] 正在解析文档结构...'
-      }, 'worker-picked');
+      if (task.engine === 'local-mineru') {
+        const materialInfo = task.optionsSnapshot?.material || {}; // Need real file info
+        const objectName = materialInfo.metadata?.objectName;
+        if (!objectName) throw new Error('任务缺少真实的文件对象信息 (objectName)');
+        if (!this.minioContext) throw new Error('Worker 缺少存储上下文 (MinIO 客户端未注入)');
+        
+        await this.transition(task, {
+          stage: 'process',
+          state: 'running',
+          progress: 5,
+          message: '正在拉取文件并连接本地 MinerU...'
+        }, 'worker-picked');
+        
+        const fileStream = await this.minioContext.getFileStream(objectName);
+        
+        await processWithLocalMinerU({
+          task,
+          material: materialInfo,
+          fileStream,
+          fileName: materialInfo.fileName || 'document.pdf',
+          mimeType: materialInfo.mimeType || 'application/pdf',
+          timeoutMs: Number(task.optionsSnapshot?.localTimeout || 3600) * 1000,
+          minioContext: this.minioContext,
+          updateProgress: async (updateInfo) => {
+            const eventName = updateInfo.stage === 'store' ? 'stage-changed' : 'progress-update';
+            await this.transition(task, updateInfo, eventName);
+          }
+        });
+        
+        await this.transition(task, {
+          stage: 'complete',
+          state: 'ai-pending',
+          progress: 100,
+          message: 'MinerU 解析完成，产物已落库，等待 AI 元数据识别',
+          completedAt: new Date().toISOString()
+        }, 'worker-completed');
 
-      await this.sleep(SIMULATED_DELAY_MS);
+      } else {
+        // 1. 进入 running 状态 (模拟过程)
+        await this.transition(task, {
+          stage: 'process',
+          state: 'running',
+          progress: 10,
+          message: '[worker skeleton] 正在解析文档结构...'
+        }, 'worker-picked');
 
-      // 2. 模拟中途进度
-      await this.transition(task, {
-        progress: 50,
-        message: '[worker skeleton] 正在提取文本与表格内容...'
-      }, 'progress-update');
+        await this.sleep(SIMULATED_DELAY_MS);
 
-      await this.sleep(SIMULATED_DELAY_MS);
+        // 2. 模拟中途进度
+        await this.transition(task, {
+          progress: 50,
+          message: '[worker skeleton] 正在提取文本与表格内容...'
+        }, 'progress-update');
 
-      // 3. 进入 result-store 状态
-      await this.transition(task, {
-        stage: 'store',
-        state: 'result-store',
-        progress: 80,
-        message: '[worker skeleton] 正在保存解析产物到存储后端...'
-      }, 'stage-changed');
+        await this.sleep(SIMULATED_DELAY_MS);
 
-      await this.sleep(SIMULATED_DELAY_MS);
+        // 3. 进入 result-store 状态
+        await this.transition(task, {
+          stage: 'store',
+          state: 'result-store',
+          progress: 80,
+          message: '[worker skeleton] 正在保存解析产物到存储后端...'
+        }, 'stage-changed');
 
-      // 4. 完成模拟，进入已就绪待 AI 处理状态
-      await this.transition(task, {
-        stage: 'complete',
-        state: 'ai-pending',
-        progress: 100,
-        message: '[worker skeleton] 解析完成（模拟），等待 AI 元数据识别',
-        completedAt: new Date().toISOString()
-      }, 'worker-completed');
+        await this.sleep(SIMULATED_DELAY_MS);
+
+        // 4. 完成模拟，进入已就绪待 AI 处理状态
+        await this.transition(task, {
+          stage: 'complete',
+          state: 'ai-pending',
+          progress: 100,
+          message: '[worker skeleton] 解析完成（模拟），等待 AI 元数据识别',
+          completedAt: new Date().toISOString()
+        }, 'worker-completed');
+      }
 
     } catch (error) {
       console.error(`[task-worker] Task ${task.id} failed: ${error.message}`);

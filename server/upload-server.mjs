@@ -1983,7 +1983,7 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
     if (!dbMatResp.ok) throw new Error(`同步 Material 到 db-server 失败`);
 
     // 3. 创建 ParseTask
-    const optionsSnapshot = { ...req.body };
+    const optionsSnapshot = { ...req.body, material };
     const parseTask = {
       id: taskId,
       materialId: materialId,
@@ -3276,8 +3276,18 @@ app.use((err, req, res, _next) => {
   console.error(`[upload-server] unhandled route error [${requestId}] ${req.method} ${req.path}:`, message);
   if (!res.headersSent) res.status(status).json({ error: message, requestId });
 });
-
-const worker = new ParseTaskWorker();
+const worker = new ParseTaskWorker({
+  getFileStream: async (objectName) => {
+    return await getMinioClient().getObject(getMinioBucket(), objectName);
+  },
+  saveMarkdown: async (objectName, markdown) => {
+    const bucket = getParsedBucket();
+    const client = getMinioClient();
+    await ensureBucket(client, bucket);
+    const buffer = Buffer.from(markdown, 'utf-8');
+    await client.putObject(bucket, objectName, buffer, buffer.length, { 'Content-Type': 'text/markdown; charset=utf-8' });
+  }
+});
 
 const server = app.listen(port, async () => {
   console.log(`[upload-server] listening on http://localhost:${port}`);
