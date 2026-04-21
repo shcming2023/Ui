@@ -64,7 +64,8 @@ export class ParseTaskWorker {
 
   async processTask(task) {
     processingMap.add(task.id);
-    console.log(`[task-worker] Picked up task: ${task.id} (worker skeleton)`);
+    const modeLabel = task.engine === 'local-mineru' ? 'local-mineru' : 'worker skeleton';
+    console.log(`[task-worker] Picked up task: ${task.id} (${modeLabel})`);
 
     try {
       if (task.engine === 'local-mineru') {
@@ -148,7 +149,7 @@ export class ParseTaskWorker {
       await this.transition(task, {
         state: 'failed',
         errorMessage: error.message,
-        message: `[worker skeleton] 执行失败: ${error.message}`
+        message: `[${modeLabel}] 执行失败: ${error.message}`
       }, 'worker-failed', 'error');
     } finally {
       processingMap.delete(task.id);
