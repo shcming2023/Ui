@@ -39,43 +39,64 @@ export class OllamaProvider extends BaseProvider {
         { role: 'user', content: markdownContent }
       ],
       stream: false,
+      format: 'json', // 强制 Ollama 输出 JSON 
       options: {
-        temperature: this.temperature
+        temperature: this.temperature,
+        num_predict: options.num_predict || 512 // 限制输出长度，防止无限生成
       }
     };
 
     const startTime = Date.now();
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeoutMs)
-    });
+    try {
+      const response = await fetch(`${this.baseUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(this.timeoutMs)
+      });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Ollama API error: HTTP ${response.status} - ${errorText}`);
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Ollama API error: HTTP ${response.status} - ${errorText}`);
+      }
+
+      const data = await response.json();
+      const rawContent = data.message?.content || '';
+      const duration = Date.now() - startTime;
+
+      const result = this.parseJsonRobust(rawContent);
+      if (!result) {
+        throw new Error(`Failed to parse JSON from Ollama response, model: ${this.model}`);
+      }
+
+      return {
+        result,
+        rawResponse: rawContent,
+        usage: {
+          total_duration_ms: duration,
+          prompt_tokens: data.prompt_eval_count || 0,
+          completion_tokens: data.eval_count || 0
+        },
+        provider: this.id,
+        model: this.model
+      };
+    } catch (err) {
+      const duration = Date.now() - startTime;
+      const errorDetail = {
+        name: err.name,
+        message: err.message,
+        cause: err.cause ? { code: err.cause.code, message: err.cause.message } : null,
+        baseUrl: this.baseUrl,
+        model: this.model,
+        timeoutMs: this.timeoutMs,
+        durationMs: duration
+      };
+      
+      const detailedMessage = `Ollama Provider Error: [${err.name}] ${err.message} (BaseURL: ${this.baseUrl}, Model: ${this.model}, Duration: ${duration}ms, Timeout: ${this.timeoutMs}ms)`;
+      
+      const error = new Error(detailedMessage);
+      error.details = errorDetail;
+      throw error;
     }
-
-    const data = await response.json();
-    const rawContent = data.message?.content || '';
-    const duration = Date.now() - startTime;
-
-    const result = this.parseJsonRobust(rawContent);
-    if (!result) {
-      throw new Error('Failed to parse JSON from Ollama response');
-    }
-
-    return {
-      result,
-      rawResponse: rawContent,
-      usage: {
-        total_duration_ms: duration,
-        prompt_tokens: data.prompt_eval_count || 0,
-        completion_tokens: data.eval_count || 0
-      },
-      provider: this.id,
-      model: this.model
-    };
   }
 }

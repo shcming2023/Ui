@@ -150,17 +150,50 @@ export class AiMetadataWorker {
       }
 
       // 5. 执行 AI 识别
+      const requestPayload = { 
+        provider: providerId, 
+        model: provider.model, 
+        baseUrl: provider.baseUrl,
+        timeoutMs: provider.timeoutMs,
+        inputLength: markdownContent.length 
+      };
+
       await this.transition(job, {
         state: 'running',
         progress: 20,
         message: `正在使用 ${providerId} (${provider.model}) 进行识别...`
-      }, 'ai-provider-called', 'info', { provider: providerId, model: provider.model, inputLength: markdownContent.length });
+      }, 'ai-provider-request-started', 'info', requestPayload);
 
       let aiResponse;
       try {
         aiResponse = await this.executeWithFallback(provider, markdownContent, aiSettings);
+        
+        await logTaskEvent({
+          taskId: job.parseTaskId,
+          event: 'ai-provider-request-succeeded',
+          level: 'info',
+          message: `AI Provider (${providerId}) 响应成功`,
+          payload: { 
+            ...requestPayload,
+            durationMs: aiResponse.usage?.total_duration_ms,
+            usage: aiResponse.usage 
+          }
+        });
       } catch (err) {
         console.error(`[ai-worker] Job ${job.id} failed after attempts: ${err.message}`);
+        
+        await logTaskEvent({
+          taskId: job.parseTaskId,
+          event: 'ai-provider-request-failed',
+          level: 'warn',
+          message: `AI Provider 调用失败: ${err.message}`,
+          payload: { 
+            ...requestPayload,
+            error: err.message,
+            details: err.details 
+          }
+        });
+
         // 如果所有 provider 都失败，尝试降级到模拟
         return await this.degradeToSkeleton(job, `AI Provider 调用全部失败: ${err.message}，自动降级为模拟结果完成链路`);
       }
@@ -265,7 +298,10 @@ export class AiMetadataWorker {
         const provider = providersToTry[i];
         try {
             const systemPrompt = aiSettings.systemPrompt || this.getDefaultPrompt();
-            const resp = await provider.extractMetadata(markdown, { systemPrompt });
+            const resp = await provider.extractMetadata(markdown, { 
+                systemPrompt,
+                num_predict: aiSettings.num_predict || 512
+            });
             if (i > 0) resp.fallbackOccurred = true;
             return resp;
         } catch (err) {
