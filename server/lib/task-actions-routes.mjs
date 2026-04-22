@@ -263,6 +263,8 @@ export function registerTaskActionRoutes(app) {
       return null;
     }
     return task;
+  }
+  
   // batch retry (MUST be before :id routes)
   app.post('/tasks/batch/retry', async (req, res) => {
     try {

@@ -19,8 +19,8 @@ import { toast } from 'sonner';
  * TaskManagementPage — 任务管理
  *
  * 按 PRD v0.4 §6.3「展示桶」规范：
- *   queued     ← uploading, pending
- *   processing ← running, result-store, ai-pending, ai-running
+ *   queued     ← uploading, pending, ai-pending
+ *   processing ← running, result-store, ai-running
  *   reviewing  ← review-pending
  *   completed  ← completed
  *   failed     ← failed
