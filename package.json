@@ -13,7 +13,11 @@
     "uat:build": "bash start-uat.sh --build",
     "uat:stop": "bash start-uat.sh stop",
     "uat:smoke": "bash uat/smoke-test.sh",
-    "test:local-mineru": "node server/test-local-mineru.mjs"
+    "test:local-mineru": "node server/test-local-mineru.mjs",
+    "test": "bash scripts/run-tests.sh all",
+    "test:smoke": "bash scripts/run-tests.sh smoke",
+    "test:uat": "bash scripts/run-tests.sh uat",
+    "test:uat:headed": "bash scripts/run-tests.sh uat --headed"
   },
   "dependencies": {
     "@popperjs/core": "2.11.8",

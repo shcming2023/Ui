@@ -7,12 +7,22 @@ import { test, expect, type Page } from '@playwright/test';
  *   1. 页面加载与 SPA 路由
  *   2. 后端服务健康检查（via Nginx 代理）
  *   3. DB API 基础功能（资产列表、设置读写）
- *   4. 文件上传流程（含 MinIO presigned URL 局域网可访问性验证）
+ *   4. 文件上传流程（含 MinIO presigned URL 公开地址验证）
  *   5. MinIO Nginx 代理可达性
  *   6. 数据持久化（写入后重新加载验证）
+ *
+ * 环境变量：
+ *   BASE_URL    测试目标地址（默认 http://localhost:8081）
+ *   PUBLIC_HOST presigned URL 断言用公网主机名（未设置时跳过主机名匹配）
  */
 
-const BASE_URL = process.env.BASE_URL || 'http://192.168.31.33:8081';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8081';
+
+// PUBLIC_HOST 用于 presigned URL 主机名断言（可选，未配置则跳过主机名断言）
+const PUBLIC_HOST = process.env.PUBLIC_HOST || '';
+
+// UAT 命名空间前缀——所有测试写入的键/ID 必须以此开头，afterAll 统一清理
+const UAT_PREFIX = 'uat_';
 
 // ── 辅助函数 ──────────────────────────────────────────────────
 
@@ -88,7 +98,38 @@ test.describe('【2】后端服务健康检查', () => {
 
 // ── 测试组 3：DB API 基础功能 ─────────────────────────────────
 
+// 记录本次测试写入的 settingsKeys 与 materialIds，供 afterAll 清理
+const uatSettingsKeys: string[] = [];
+const uatMaterialIds: (string | number)[] = [];
+
 test.describe('【3】db-server REST API', () => {
+  test.afterAll(async ({ request }) => {
+    // 清理写入 settings 中的 UAT 测试键
+    if (uatSettingsKeys.length > 0) {
+      try {
+        const getResp = await request.get(`${BASE_URL}/__proxy/db/settings`);
+        if (getResp.ok()) {
+          const current = await getResp.json() as Record<string, unknown>;
+          const cleaned: Record<string, unknown> = {};
+          for (const [k, v] of Object.entries(current)) {
+            if (!uatSettingsKeys.includes(k)) cleaned[k] = v;
+          }
+          await request.put(`${BASE_URL}/__proxy/db/settings`, {
+            data: cleaned,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
+      } catch { /* afterAll 清理失败不中止 */ }
+    }
+
+    // 清理写入 materials 中的 UAT 测试资料
+    for (const id of uatMaterialIds) {
+      try {
+        await request.delete(`${BASE_URL}/__proxy/db/materials/${id}`);
+      } catch { /* 已删除或清理失败不中止 */ }
+    }
+  });
+
   test('GET /materials 返回有效响应', async ({ request }) => {
     const response = await request.get(`${BASE_URL}/__proxy/db/materials`);
     expect(response.status()).toBe(200);
@@ -105,8 +146,9 @@ test.describe('【3】db-server REST API', () => {
   });
 
   test('数据持久化：写入后重新读取一致', async ({ request }) => {
-    const testKey = `uat_test_${Date.now()}`;
+    const testKey = `${UAT_PREFIX}test_${Date.now()}`;
     const testValue = `test_value_${Math.random().toString(36).slice(2)}`;
+    uatSettingsKeys.push(testKey);
 
     // 写入测试设置
     const putResp = await request.put(`${BASE_URL}/__proxy/db/settings`, {
@@ -123,8 +165,9 @@ test.describe('【3】db-server REST API', () => {
   });
 
   test('secrets 持久化：写入后重新读取一致', async ({ request }) => {
-    const testKey = `uat_secret_${Date.now()}`;
+    const testKey = `${UAT_PREFIX}secret_${Date.now()}`;
     const testValue = `secret_${Math.random().toString(36).slice(2)}`;
+    uatSettingsKeys.push(testKey);
 
     const putResp = await request.put(`${BASE_URL}/__proxy/db/secrets`, {
       data: { [testKey]: testValue },
@@ -139,10 +182,12 @@ test.describe('【3】db-server REST API', () => {
   });
 
   test('materials 删除：DELETE /materials/:id 生效', async ({ request }) => {
-    const id = Date.now() * 1000 + Math.floor(Math.random() * 1000);
+    const id = `${UAT_PREFIX}del_${Date.now()}`;
+    uatMaterialIds.push(id);
+
     const material = {
       id,
-      title: 'uat-delete-test',
+      title: `${UAT_PREFIX}delete-test`,
       type: 'TXT',
       size: '0.0 MB',
       sizeBytes: 0,
@@ -164,11 +209,14 @@ test.describe('【3】db-server REST API', () => {
 
     const delResp = await request.delete(`${BASE_URL}/__proxy/db/materials/${id}`);
     expect(delResp.status()).toBeLessThan(300);
+    // 删除成功后从待清理列表中移除（已删除无需再次尝试）
+    const idx = uatMaterialIds.indexOf(id);
+    if (idx !== -1) uatMaterialIds.splice(idx, 1);
 
     const listResp = await request.get(`${BASE_URL}/__proxy/db/materials`);
     expect(listResp.status()).toBe(200);
-    const list = await listResp.json() as Array<{ id: number }>;
-    expect(list.find((m) => m.id === id)).toBeFalsy();
+    const list = await listResp.json() as Array<{ id: unknown }>;
+    expect(list.find((m) => String(m.id) === String(id))).toBeFalsy();
   });
 });
 
@@ -181,7 +229,7 @@ test.describe('【4】MinIO Nginx 反向代理', () => {
     expect(response.status()).toBe(200);
   });
 
-  test('presigned URL 中包含局域网公开地址（非内部容器地址）', async ({ request }) => {
+  test('presigned URL 中不含内部容器地址', async ({ request }) => {
     // 通过 /list 接口获取已有文件的 presigned URL（如有文件）
     const listResp = await request.get(`${BASE_URL}/__proxy/upload/list?prefix=originals`);
     if (listResp.status() !== 200) {
@@ -194,7 +242,7 @@ test.describe('【4】MinIO Nginx 反向代理', () => {
 
     if (objects.length === 0) {
       // 没有文件时跳过（空环境），不视为失败
-      console.log('  [跳过] MinIO 中暂无文件，presigned URL 检查跳过');
+      test.skip();
       return;
     }
 
@@ -202,17 +250,30 @@ test.describe('【4】MinIO Nginx 反向代理', () => {
     for (const obj of objects.slice(0, 3)) {
       const url = obj.presignedUrl;
       expect(url).not.toMatch(/minio:\d+/);
-      expect(url).not.toMatch(/localhost:\d+/);
-      // 应包含配置的公开地址
-      expect(url).toContain('192.168.31.33');
-      console.log(`  ✓ presigned URL: ${url.slice(0, 80)}...`);
+      // 若配置了 PUBLIC_HOST，验证 URL 中包含该主机名；否则只检查没有内部地址
+      if (PUBLIC_HOST) {
+        expect(url).toContain(PUBLIC_HOST);
+      }
     }
   });
 });
 
 // ── 测试组 5：文件上传流程 ────────────────────────────────────
 
+// 记录上传测试产生的任务 ID，供 afterAll 清理
+const uatTaskIds: string[] = [];
+
 test.describe('【5】文件上传流程', () => {
+  test.afterAll(async ({ request }) => {
+    if (uatTaskIds.length === 0) return;
+    try {
+      await request.delete(`${BASE_URL}/__proxy/db/tasks`, {
+        data: { ids: uatTaskIds },
+        headers: { 'Content-Type': 'application/json' },
+      });
+    } catch { /* afterAll 清理失败不中止 */ }
+  });
+
   test('upload-server /tasks 接受小型测试文件并创建任务', async ({ request }) => {
     // 创建一个最小的有效 PNG 文件（1x1 像素）
     const minimalPng = Buffer.from(
@@ -220,9 +281,6 @@ test.describe('【5】文件上传流程', () => {
       '0000000a49444154789c6260000000020001e221bc330000000049454e44ae426082',
       'hex',
     );
-
-    const formData = new FormData();
-    formData.append('file', new Blob([minimalPng], { type: 'image/png' }), 'uat-test.png');
 
     const response = await request.post(`${BASE_URL}/__proxy/upload/tasks`, {
       multipart: {
@@ -234,25 +292,29 @@ test.describe('【5】文件上传流程', () => {
       },
     });
 
-    // 200 = 上传成功，507 = 存储配额不足（可接受），其余为失败
-    const status = response.status();
-    if (status === 200) {
-      const body = await response.json() as { taskId?: string; materialId?: string; url?: string; provider?: string };
-      expect(body.taskId).toBeTruthy();
-      console.log(`  ✓ 上传成功，provider: ${body.provider}, URL: ${body.url?.slice(0, 60)}...`);
+    // 若存储未配置（507），跳过而非失败
+    if (response.status() === 507) {
+      test.skip();
+      return;
+    }
 
-      // 若 URL 指向 MinIO，验证其为局域网可访问地址
-      if (body.provider === 'minio' && body.url) {
-        expect(body.url).not.toMatch(/^http:\/\/minio:/);
-        expect(body.url).toMatch(/192\.168\.31\.33/);
+    expect(response.status()).toBe(200);
+    const body = await response.json() as { taskId?: string; materialId?: string; url?: string; provider?: string };
+    expect(body.taskId).toBeTruthy();
+
+    if (body.taskId) uatTaskIds.push(body.taskId);
+
+    // 若 URL 指向 MinIO，验证其不含内部容器地址
+    if (body.provider === 'minio' && body.url) {
+      expect(body.url).not.toMatch(/^http:\/\/minio:/);
+      // 若配置了 PUBLIC_HOST，验证主机名
+      if (PUBLIC_HOST) {
+        expect(body.url).toContain(PUBLIC_HOST);
       }
-    } else {
-      console.warn(`  ⚠ 上传返回 HTTP ${status}，可能是存储未配置，跳过断言`);
     }
   });
 
-  test('上传后 presigned URL 在局域网可直接访问（HTTP GET）', async ({ request }) => {
-    // 先上传一个小文件
+  test('上传后 presigned URL 在目标服务器可直接访问（HTTP GET）', async ({ request }) => {
     const content = Buffer.from(`UAT test file ${Date.now()}`);
 
     const uploadResp = await request.post(`${BASE_URL}/__proxy/upload/tasks`, {
@@ -265,21 +327,25 @@ test.describe('【5】文件上传流程', () => {
       },
     });
 
-    if (uploadResp.status() !== 200) {
-      console.warn('  ⚠ 上传失败，跳过 presigned URL 访问测试');
+    // 存储未配置时跳过
+    if (uploadResp.status() === 507) {
+      test.skip();
       return;
     }
+    expect(uploadResp.status()).toBe(200);
 
-    const body = await uploadResp.json() as { url?: string; provider?: string };
+    const body = await uploadResp.json() as { taskId?: string; url?: string; provider?: string };
+    if (body.taskId) uatTaskIds.push(body.taskId);
+
+    // 非 MinIO 存储或无 URL 时跳过
     if (body.provider !== 'minio' || !body.url) {
-      console.warn('  ⚠ 非 MinIO 存储或无 URL，跳过测试');
+      test.skip();
       return;
     }
 
     // 直接 GET presigned URL，验证文件可访问
     const fileResp = await request.get(body.url);
     expect(fileResp.status()).toBe(200);
-    console.log(`  ✓ presigned URL 可直接访问：${body.url.slice(0, 80)}...`);
   });
 });
 
@@ -309,3 +375,4 @@ test.describe('【6】页面导航交互（冒烟）', () => {
     }
   });
 });
+

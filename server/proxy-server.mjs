@@ -16,9 +16,9 @@
  *   PROXY_PORT           代理监听端口，默认 8081
  *   UPLOAD_PORT          upload-server 端口，默认 8788
  *   DB_PORT              db-server 端口，默认 8789
- *   MINIO_HOST           MinIO 主机，默认 192.168.31.33
+ *   MINIO_HOST           MinIO 主机，默认 host.docker.internal
  *   MINIO_PORT           MinIO API 端口，默认 9000
- *   MINERU_HOST          MinerU 服务主机，默认 192.168.31.33
+ *   MINERU_HOST          MinerU 服务主机，默认 host.docker.internal
  *   MINERU_PORT          MinerU 服务端口，默认 8083
  *   INTERNAL_API_TOKEN   内网服务间共享密钥（db-server 同值），防止 db-server 裸露
  *   NODE_ENV             设为 production 时启用 HTTPS 证书校验
@@ -37,9 +37,9 @@ const DIST_DIR = path.join(__dirname, '..', 'dist');
 const PROXY_PORT  = Number(process.env.PROXY_PORT  || 8081);
 const UPLOAD_PORT = Number(process.env.UPLOAD_PORT || 8788);
 const DB_PORT     = Number(process.env.DB_PORT     || 8789);
-const MINIO_HOST  = process.env.MINIO_HOST || '192.168.31.33';
+const MINIO_HOST  = process.env.MINIO_HOST || 'host.docker.internal';
 const MINIO_PORT  = Number(process.env.MINIO_PORT  || 9000);
-const MINERU_HOST = process.env.MINERU_HOST || '192.168.31.33';
+const MINERU_HOST = process.env.MINERU_HOST || 'host.docker.internal';
 const MINERU_PORT = Number(process.env.MINERU_PORT || 8083);
 
 // 内网服务间共享密钥，转发到 db-server 时自动注入 X-Internal-Token 头
@@ -304,7 +304,7 @@ server.listen(PROXY_PORT, '0.0.0.0', () => {
 ╔══════════════════════════════════════════════════════╗
 ║         EduAsset CMS — 局域网反向代理已启动           ║
 ╠══════════════════════════════════════════════════════╣
-║  访问地址：http://192.168.31.33:${PROXY_PORT}              ║
+║  访问地址：http://${process.env.CMS_HOST || 'localhost'}:${PROXY_PORT}              ║
 ║  代理规则：                                           ║
 ║    /minio/*              → MinIO (${MINIO_HOST}:${MINIO_PORT})    ║
 ║    /__proxy/upload/*     → upload-server (:${UPLOAD_PORT})     ║

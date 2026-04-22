@@ -457,7 +457,7 @@ export class AiMetadataWorker {
   createProvider(id, aiSettings) {
     // Docker 部署环境下，访问宿主机 Ollama 推荐使用 host.docker.internal
     const HOST_DOCKER_OLLAMA = 'http://host.docker.internal:11434/v1/chat/completions';
-    const MAC_MINI_OLLAMA = 'http://192.168.31.33:11434/v1/chat/completions';
+    const MAC_MINI_OLLAMA = `http://${process.env.OLLAMA_HOST || 'host.docker.internal'}:11434/v1/chat/completions`;
     
     // 优先使用配置的地址，否则尝试 host.docker.internal，最后兜底 Mac mini 默认 IP
     let url = aiSettings.ollamaBaseUrl || aiSettings.baseUrl || aiSettings.apiEndpoint || HOST_DOCKER_OLLAMA;
@@ -496,9 +496,9 @@ export class AiMetadataWorker {
       });
     }
 
-    // 兜底返回 Mac mini 内网 Ollama
+    // 兜底返回 host.docker.internal Ollama（容器内可访问宿主机）
     return new OpenAiCompatibleProvider({
-      baseUrl: 'http://192.168.31.33:11434',
+      baseUrl: `http://${process.env.OLLAMA_HOST || 'host.docker.internal'}:11434`,
       model: aiSettings.ollamaModel || aiSettings.model || 'qwen3.5:9b',
       apiKey: aiSettings.openaiApiKey || aiSettings.apiKey,
       timeoutMs,

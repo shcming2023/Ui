@@ -8,7 +8,7 @@
 #    ./start-uat.sh stop     # 停止所有已启动的服务进程
 #
 #  依赖：Node.js v18+（当前 v22），pnpm
-#  访问：http://192.168.31.33:8081
+#  访问：http://${CMS_HOST:-localhost}:8081（可通过 CMS_HOST 环境变量指定显示主机名）
 # ============================================================
 
 set -euo pipefail
@@ -154,7 +154,7 @@ cd "$SCRIPT_DIR"
 PROXY_PORT="$PROXY_PORT" \
 UPLOAD_PORT="$UPLOAD_PORT" \
 DB_PORT="$DB_PORT" \
-MINIO_HOST="${MINIO_ENDPOINT:-192.168.31.33}" \
+MINIO_HOST="${MINIO_ENDPOINT:-host.docker.internal}" \
 MINIO_PORT="${MINIO_PORT:-9000}" \
   node server/proxy-server.mjs &
 PROXY_PID=$!
@@ -170,7 +170,7 @@ echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║         EduAsset CMS UAT 环境启动成功！              ║${NC}"
 echo -e "${GREEN}╠══════════════════════════════════════════════════════╣${NC}"
-echo -e "${GREEN}║  访问地址：http://192.168.31.33:${PROXY_PORT}              ║${NC}"
+echo -e "${GREEN}║  访问地址：http://${CMS_HOST:-localhost}:${PROXY_PORT}        ║${NC}"
 echo -e "${GREEN}║  日志文件：/tmp/cms-upload-server.log                ║${NC}"
 echo -e "${GREEN}║            /tmp/cms-db-server.log                   ║${NC}"
 echo -e "${GREEN}║  停止服务：./start-uat.sh stop                       ║${NC}"

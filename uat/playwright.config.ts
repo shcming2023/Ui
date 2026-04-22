@@ -9,7 +9,7 @@ import { defineConfig, devices } from '@playwright/test';
  *   npx playwright test --config=uat/playwright.config.ts
  */
 
-const BASE_URL = process.env.BASE_URL || 'http://192.168.31.33:8081';
+const BASE_URL = process.env.BASE_URL || 'http://localhost:8081';
 
 export default defineConfig({
   testDir: './tests',
