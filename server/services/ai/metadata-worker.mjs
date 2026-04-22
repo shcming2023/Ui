@@ -537,8 +537,10 @@ JSON 结构需包含以下字段（符合 PRD 10.5.3）：
 - confidence (number): 0-100 的整体识别置信度
 - fieldConfidence (object): 各核心字段的置信度得分
 - needsReview (boolean): 建议人工复核
-
-无法判断的字段请填入空字符串或 "unknown"；不要编造信息。`;
+ 
+无法判断的字段请填入空字符串或 "unknown"；不要编造信息。
+ 
+请注意：不要输出 <think> 标签或任何思维链过程，直接输出 JSON。如果模型自带思维过程，请确保它在 JSON 块之外。`;
   }
 
   async transition(job, update, eventName, level = 'info', payload = {}) {
@@ -581,12 +583,14 @@ JSON 结构需包含以下字段（符合 PRD 10.5.3）：
 
     let content = raw.trim();
     
-    // 尝试匹配 ```json ... ```
+    // 1. 预处理：去除 <think>...</think> 标签及其内容 (Qwen/DeepSeek 常用)
+    content = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    
+    // 2. 匹配 JSON 块
     const jsonBlockMatch = content.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
     if (jsonBlockMatch && jsonBlockMatch[1]) {
       content = jsonBlockMatch[1].trim();
     } else {
-      // 尝试匹配第一个 { 到最后一个 }
       const braceMatch = content.match(/(\{[\s\S]*\})/);
       if (braceMatch && braceMatch[1]) {
         content = braceMatch[1].trim();
@@ -594,17 +598,25 @@ JSON 结构需包含以下字段（符合 PRD 10.5.3）：
     }
 
     try {
-      return JSON.parse(content);
+      let parsed = JSON.parse(content);
+      
+      // 3. 递归处理：如果解析出的对象包含 content 且 content 看起来像 JSON (某些 Provider 的嵌套行为)
+      if (parsed && typeof parsed.content === 'string' && parsed.content.trim().startsWith('{')) {
+        try {
+          const inner = JSON.parse(parsed.content);
+          parsed = { ...parsed, ...inner };
+        } catch (e) { /* ignore */ }
+      }
+      
+      return parsed;
     } catch (err) {
-      // 如果解析失败，尝试清理掉结尾可能存在的额外字符（如：模型输出完 JSON 后又自言自语）
+      // 4. 兜底：尝试清理结尾杂质
       try {
         const lastBrace = content.lastIndexOf('}');
         if (lastBrace !== -1) {
           return JSON.parse(content.slice(0, lastBrace + 1));
         }
-      } catch (innerErr) {
-        // 依然失败，抛出原始解析错误
-      }
+      } catch (innerErr) { /* ignore */ }
       throw err;
     }
   }
