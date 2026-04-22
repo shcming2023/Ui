@@ -49,7 +49,7 @@ lucode 的代码推送到 GitHub 后，自动成为 lucia 的输入
 如有环境变量、Docker 配置、数据库 schema 等变更，必须在任务报告中标注 ⚠️ 需通知 lucia
 
 ### 锚点四：PRD 基准与工程契约
-PRD 文档：`docs/prd/mineru-local-ai-metadata-prd-v0.4.md`
+PRD 文档：`docs/prd/Luceon2026-PRD-v0.4.md`
 
 - **唯一真相来源**：本项目后续开发、实现与验收，**必须且仅以 v0.4（综合修订版）为基准**。
 - **文档定位**：v0.4 是“工程契约型 PRD”，它是独立自包含的，替代并废弃所有历史版本（v0.1-v0.3）。
