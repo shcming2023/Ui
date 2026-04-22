@@ -2428,6 +2428,85 @@ app.post('/ai/test', async (req, res) => {
   }
 });
 
+/**
+ * DELETE /__proxy/upload/materials/:id
+ * 级联删除数据（PRD §11.3）：
+ * 1. 从 MinIO 删除原始文件 (originals/{id}/...)
+ * 2. 从 MinIO 删除解析产物 (parsed/{id}/...)
+ * 3. 从 DB 删除所有关联的 ParseTask
+ * 4. 从 DB 删除所有关联的 AiMetadataJob
+ * 5. 从 DB 删除 Material 记录本身
+ */
+app.delete('/__proxy/upload/materials/:id', async (req, res) => {
+  const mid = req.params.id;
+  const dbBaseUrl = process.env.DB_BASE_URL || 'http://localhost:8789';
+
+  try {
+    // 1. 获取 Material 信息
+    const matResp = await fetch(`${dbBaseUrl}/materials/${encodeURIComponent(mid)}`);
+    if (!matResp.ok) {
+      if (matResp.status === 404) return res.status(404).json({ error: '资料不存在' });
+      throw new Error(`无法获取资料信息 (HTTP ${matResp.status})`);
+    }
+    const material = await matResp.json();
+
+    // 2. 清理 MinIO 文件
+    if (process.env.STORAGE_BACKEND === 'minio') {
+      const minio = getMinioClient();
+      const bucket = getMinioBucket();
+      const parsedBucket = getParsedBucket();
+      
+      // 删除原始文件
+      const obj = material?.metadata?.objectName;
+      if (obj) {
+        await minio.removeObject(bucket, obj).catch(e => console.warn(`[Delete] Remove original failed: ${e.message}`));
+      }
+      
+      // 删除解析目录 (parsed/{id}/)
+      // 注意：MinIO 没有直接的目录删除，通常需要列出并批量删除
+      try {
+        const stream = minio.listObjectsV2(parsedBucket, `parsed/${mid}/`, true);
+        const objects = [];
+        for await (const item of stream) {
+          objects.push(item.name);
+        }
+        if (objects.length > 0) {
+          await minio.removeObjects(parsedBucket, objects);
+        }
+      } catch (e) {
+        console.warn(`[Delete] Remove parsed directory failed: ${e.message}`);
+      }
+    }
+
+    // 3. 获取并删除关联的任务与 Job
+    const [tasksResp, jobsResp] = await Promise.all([
+      fetch(`${dbBaseUrl}/tasks`).then(r => r.json()),
+      fetch(`${dbBaseUrl}/ai-metadata-jobs`).then(r => r.json())
+    ]);
+
+    const relatedTasks = (Array.isArray(tasksResp) ? tasksResp : []).filter(t => String(t.materialId) === String(mid));
+    const taskIds = new Set(relatedTasks.map(t => String(t.id)));
+    const relatedJobs = (Array.isArray(jobsResp) ? jobsResp : []).filter(j => taskIds.has(String(j.parseTaskId)));
+
+    // 顺序执行删除（避免并发压力过大）
+    for (const job of relatedJobs) {
+      await fetch(`${dbBaseUrl}/ai-metadata-jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' }).catch(() => {});
+    }
+    for (const task of relatedTasks) {
+      await fetch(`${dbBaseUrl}/tasks/${encodeURIComponent(task.id)}`, { method: 'DELETE' }).catch(() => {});
+    }
+
+    // 4. 删除 Material 记录
+    const finalResp = await fetch(`${dbBaseUrl}/materials/${encodeURIComponent(mid)}`, { method: 'DELETE' });
+    if (!finalResp.ok) throw new Error(`删除资料记录失败 (HTTP ${finalResp.status})`);
+
+    res.json({ ok: true, message: `资料 ${mid} 及其关联数据已级联清理` });
+  } catch (err) {
+    console.error(`[Delete] Cascading delete failed for ${mid}:`, err);
+    res.status(500).json({ error: '级联删除失败', detail: err.message });
+  }
+});
+
 app.post('/parse/analyze', async (req, res) => {
   const {
     markdownObjectName,

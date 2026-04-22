@@ -257,7 +257,7 @@ export function registerConsistencyRoutes(app, deps) {
       }
     }
 
-    // 6) 对象存储 key 前缀
+    // 6) 对象存储 key 前缀 (PRD §9.2)
     for (const m of materialsById.values()) {
       const objectName = m?.metadata?.objectName;
       if (objectName && !String(objectName).startsWith(`originals/${m.id}/`)) {
@@ -280,6 +280,60 @@ export function registerConsistencyRoutes(app, deps) {
           message: `Material ${m.id}.metadata.markdownObjectName=${mdObject} 不以 parsed/{id}/ 开头`,
           suggestion: 'PRD v0.4 §9.2：告警但不自动移动文件',
         });
+      }
+    }
+
+    // 7) 物理文件存在性检查 (PRD §11.5)
+    if (getStorageBackend() === 'minio') {
+      const minio = getMinioClient();
+      const bucket = getMinioBucket();
+      const parsedBucket = getParsedBucket();
+
+      for (const m of materialsById.values()) {
+        const obj = m?.metadata?.objectName;
+        if (obj) {
+          try {
+            await minio.statObject(bucket, obj);
+          } catch (e) {
+            findings.push({
+              kind: 'original-file-missing',
+              severity: 'error',
+              targetType: 'Material',
+              targetId: m.id,
+              message: `原始对象 ${obj} 在 MinIO 中不存在`,
+              suggestion: 'PRD §11.5：该资料已失效，建议级联删除',
+              repair: {
+                method: 'DELETE',
+                path: `/__proxy/upload/materials/${encodeURIComponent(m.id)}`,
+                reason: '一致性扫描：原始文件丢失',
+              }
+            });
+          }
+        }
+        
+        const mdObj = m?.metadata?.markdownObjectName;
+        if (mdObj) {
+          try {
+            await minio.statObject(parsedBucket, mdObj);
+          } catch (e) {
+            // 找到该 Material 对应的 ParseTask (若存在且为终态)
+            const relatedTask = Array.from(tasksById.values()).find(t => String(t.materialId) === String(m.id) && t.state === 'completed');
+            
+            findings.push({
+              kind: 'parsed-file-missing',
+              severity: 'warn',
+              targetType: 'Material',
+              targetId: m.id,
+              message: `解析产物 ${mdObj} 在 MinIO 中不存在`,
+              suggestion: 'PRD §11.5：重置相关任务为 pending 重新解析',
+              repair: relatedTask ? {
+                method: 'POST',
+                path: `/__proxy/upload/tasks/${encodeURIComponent(relatedTask.id)}/reparse`,
+                reason: '一致性扫描：解析产物丢失，触发重解析',
+              } : null
+            });
+          }
+        }
       }
     }
 
