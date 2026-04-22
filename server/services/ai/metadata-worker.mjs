@@ -45,6 +45,10 @@ export class AiMetadataWorker {
     this.isRunning = false;
     this.minioContext = options.minioContext || (typeof options.getFileStream === 'function' ? options : null);
     this.onComplete = options.onComplete || null;
+    
+    // 注入诊断：确保存储上下文和回调已就绪
+    const hasContext = typeof this.minioContext?.getFileStream === 'function';
+    console.log(`[ai-worker] Initialized. Context: ${hasContext ? 'OK' : 'MISSING'}, Callback: ${this.onComplete ? 'YES' : 'NO'}`);
     // 默认超时时间，用于 stale running job 判断
     this.defaultTimeoutMs = 120000; // 120 秒
   }
@@ -432,11 +436,12 @@ export class AiMetadataWorker {
   }
 
   createProvider(id, aiSettings) {
-    // Mac mini Docker 部署默认使用内网 Ollama 地址
+    // Docker 部署环境下，访问宿主机 Ollama 推荐使用 host.docker.internal
+    const HOST_DOCKER_OLLAMA = 'http://host.docker.internal:11434/v1/chat/completions';
     const MAC_MINI_OLLAMA = 'http://192.168.31.33:11434/v1/chat/completions';
     
-    // 优先使用配置的地址，否则使用 Mac mini 默认地址
-    let url = aiSettings.ollamaBaseUrl || aiSettings.baseUrl || aiSettings.apiEndpoint || MAC_MINI_OLLAMA;
+    // 优先使用配置的地址，否则尝试 host.docker.internal，最后兜底 Mac mini 默认 IP
+    let url = aiSettings.ollamaBaseUrl || aiSettings.baseUrl || aiSettings.apiEndpoint || HOST_DOCKER_OLLAMA;
     const timeoutMs = aiSettings.timeoutMs || 120000;
     this.defaultTimeoutMs = timeoutMs; // 保存用于 stale job 判断
     

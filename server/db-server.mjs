@@ -95,12 +95,37 @@ const EMPTY_DB = {
 // 模块级内存缓存，启动时一次性从磁盘加载（#6 消除全量读磁盘）
 let dbCache = (() => {
   try {
-    if (!existsSync(DATA_PATH)) return structuredClone(EMPTY_DB);
+    if (!existsSync(DATA_PATH)) {
+      // 尝试恢复备份
+      const bakPath = DATA_PATH + '.bak';
+      if (existsSync(bakPath)) {
+        console.log(`[db-server] Main DB file missing, restoring from backup: ${bakPath}`);
+        const raw = readFileSync(bakPath, 'utf-8');
+        return { ...EMPTY_DB, ...JSON.parse(raw) };
+      }
+      console.log('[db-server] No data file found, starting with empty DB');
+      return structuredClone(EMPTY_DB);
+    }
     const raw = readFileSync(DATA_PATH, 'utf-8');
+    if (!raw.trim()) throw new Error('Data file is empty');
     const parsed = JSON.parse(raw);
     return { ...EMPTY_DB, ...parsed };
-  } catch {
-    return structuredClone(EMPTY_DB);
+  } catch (err) {
+    console.error(`[db-server] CRITICAL: Failed to load DB from ${DATA_PATH}: ${err.message}`);
+    // 如果主文件加载失败，尝试从备份恢复
+    const bakPath = DATA_PATH + '.bak';
+    if (existsSync(bakPath)) {
+      try {
+        console.log(`[db-server] Attempting recovery from backup: ${bakPath}`);
+        const raw = readFileSync(bakPath, 'utf-8');
+        return { ...EMPTY_DB, ...JSON.parse(raw) };
+      } catch (bakErr) {
+        console.error(`[db-server] CRITICAL: Backup recovery also failed: ${bakErr.message}`);
+      }
+    }
+    // 强制退出，防止覆盖现有数据
+    console.error('[db-server] Shutting down to prevent data loss due to corruption.');
+    process.exit(1);
   }
 })();
 
@@ -144,7 +169,26 @@ function atomicWriteJson(filePath, payload) {
   const dir = path.dirname(filePath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const tmpPath = filePath + '.tmp';
-  writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf-8');
+  const bakPath = filePath + '.bak';
+  
+  // 1. 写入临时文件
+  const content = JSON.stringify(payload, null, 2);
+  writeFileSync(tmpPath, content, 'utf-8');
+  
+  // 2. 如果主文件存在，先创建备份
+  if (existsSync(filePath)) {
+    try {
+      // 简单拷贝作为备份
+      const current = readFileSync(filePath);
+      if (current.length > 0) {
+        writeFileSync(bakPath, current);
+      }
+    } catch (e) {
+      console.warn('[db-server] Failed to create backup:', e.message);
+    }
+  }
+  
+  // 3. 原子更名
   renameSync(tmpPath, filePath);
 }
 
@@ -175,16 +219,33 @@ function writeDB() {
 }
 
 function flushDBSync() {
-  flushDB();
+  if (writeTimer) clearTimeout(writeTimer);
+  if (maxWriteTimer) clearTimeout(maxWriteTimer);
+  writeTimer = null;
+  maxWriteTimer = null;
+  writeQueuedAt = 0;
+  try {
+    atomicWriteJson(DATA_PATH, dbCache);
+    console.log('[db-server] flushDBSync: Data written to disk');
+  } catch (e) {
+    console.error('[db-server] flushDBSync failed:', e.message);
+  }
 }
 
 function flushSecretsSync() {
+  if (secretsWriteTimer) clearTimeout(secretsWriteTimer);
+  if (secretsMaxWriteTimer) clearTimeout(secretsMaxWriteTimer);
+  secretsWriteTimer = null;
+  secretsMaxWriteTimer = null;
+  secretsWriteQueuedAt = 0;
   try {
     atomicWriteJson(SECRETS_PATH, secretsCache);
+    console.log('[db-server] flushSecretsSync: Secrets written to disk');
   } catch (e) {
-    console.error('[db-server] secrets flush on shutdown failed:', e.message);
+    console.error('[db-server] flushSecretsSync failed:', e.message);
   }
 }
+
 
 function flushSecrets() {
   if (secretsWriteTimer) clearTimeout(secretsWriteTimer);
