@@ -375,8 +375,7 @@ export function registerConsistencyRoutes(app, deps) {
                   message: '一致性扫描：解析产物丢失，标记为资源缺失',
                   metadata: { ...(relatedTask.metadata || {}), resourceLost: true },
                 },
-              } : null
-              } : null
+              } : null,
             });
           }
         }
