@@ -3,7 +3,7 @@
 版本：v0.3  
 日期：2026-04-22  
 基线代码：`e7a08ec711c113be02ed9e4c356651bb443adc7b`  
-参考原型：<https://mineru.net/OpenSourceTools/Extractor>
+参考原型：<https://mineru.net/OpenSourceTools/Extractor>（公开入口；登录后能力不纳入本版 PRD 事实范围）
 
 ---
 
@@ -28,7 +28,7 @@
 - “上传即创建任务链路已打通”成立：前端上传走 `/__proxy/upload/tasks`，后端创建 Material + ParseTask。
 - “后端已有 ParseTask Worker”成立：`server/services/queue/task-worker.mjs` 已运行并处理 `pending` 任务。
 - “解析完成后自动创建 AI Job”成立：ParseTask Worker 会创建 `AiMetadataJob`。
-- “AI 响应 JSON 提取鲁棒性已增强”成立：`AiMetadataWorker.extractJson()` 支持 `<think>` 清理、代码块提取、花括号兜底解析。
+- “AI 响应 JSON 提取鲁棒性已增强”成立：代码中的 `server/services/ai/metadata-worker.mjs` 内 `AiMetadataWorker` 类方法 `extractJson()` 支持 `<think>` 清理、代码块提取、花括号兜底解析。
 
 ### 2.2 需要修正的判断
 
@@ -289,4 +289,3 @@ Luceon2026 的定位：
 3. 实现启动恢复扫描：补偿 `pending/running/ai-pending`。
 4. 增加任务事件 SSE 推送并接入任务页实时刷新。
 5. 完成 `upload-server` 第一阶段拆分（task routes + worker services）。
-
