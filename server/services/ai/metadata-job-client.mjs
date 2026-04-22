@@ -2,7 +2,10 @@
  * metadata-job-client.mjs — AI 元数据任务客户端
  *
  * 封装对 db-server /ai-metadata-jobs 端点的调用，负责创建和查询 AiMetadataJob。
- * 包含去重逻辑：若同一 parseTaskId 已有 pending/running/succeeded 状态的 job，不重复创建。
+ *
+ * 去重规则（与 PRD v0.4 §7.3 一致）：若同一 parseTaskId 已有
+ *   pending / running / confirmed / review-pending
+ * 状态的 job，不重复创建。历史字面量 'succeeded' 仍被兼容识别为已占位（用于旧数据）。
  */
 
 const DB_BASE_URL = process.env.DB_BASE_URL || 'http://localhost:8789';
@@ -96,7 +99,15 @@ export async function updateJob(jobId, updateData) {
  */
 export async function createAiMetadataJob({ parseTaskId, materialId, inputMarkdownObjectName }) {
   // ── 去重检查 ────────────────────────────────────────────────
-  const NON_DUPLICATE_STATES = new Set(['pending', 'running', 'succeeded']);
+  // Canonical 终态：confirmed / review-pending / failed（PRD v0.4 §6.1 / §7.3）
+  // 历史兼容：succeeded 作为旧值仍被视为“已完成、占位”，避免误重复创建
+  const NON_DUPLICATE_STATES = new Set([
+    'pending',
+    'running',
+    'confirmed',
+    'review-pending',
+    'succeeded', // legacy，迁移脚本会在 v0.4 启动时归一化掉
+  ]);
   try {
     const existingJobs = await getJobsByParseTaskId(parseTaskId);
     const activeJob = existingJobs.find((j) => NON_DUPLICATE_STATES.has(j.state));

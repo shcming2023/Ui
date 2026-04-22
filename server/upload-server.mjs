@@ -42,6 +42,8 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { registerConsistencyRoutes } from './lib/consistency-routes.mjs';
+import { registerTaskActionRoutes } from './lib/task-actions-routes.mjs';
+import { taskEventBus } from './lib/task-events-bus.mjs';
 import { ParseTaskWorker } from './services/queue/task-worker.mjs';
 import { AiMetadataWorker } from './services/ai/metadata-worker.mjs';
 
@@ -3192,6 +3194,9 @@ registerConsistencyRoutes(app, {
   getMinioClient,
 });
 
+// 任务动作 API 与 SSE 推送（PRD v0.4 §8.2 / §10.2）
+registerTaskActionRoutes(app);
+
 // ─── 启动时从 db-server 恢复持久化配置 ────────────────────────
 async function loadPersistedConfig() {
   try {
@@ -3364,7 +3369,8 @@ const minioContext = {
 };
 
 const worker = new ParseTaskWorker({
-  ...minioContext,
+  minioContext,
+  eventBus: taskEventBus,
   saveMarkdown: async (objectName, markdown) => {
     const bucket = getParsedBucket();
     const client = getMinioClient();
@@ -3376,6 +3382,7 @@ const worker = new ParseTaskWorker({
 
 const aiWorker = new AiMetadataWorker({
   ...minioContext,
+  eventBus: taskEventBus,
   onComplete: async (job, update) => {
     try {
       console.log(`[upload-server] AI Job completed, backfilling results: ${job.id}`);
@@ -3408,10 +3415,16 @@ const aiWorker = new AiMetadataWorker({
       }
 
       // 4. 同步到 db-server (ParseTask) - 推进状态到终态
+      // 状态映射（PRD v0.4 §6.1/§6.2）：
+      //   AiJob.confirmed       → ParseTask.completed
+      //   AiJob.review-pending  → ParseTask.review-pending
+      //   AiJob.failed          → ParseTask.failed
       if (job.parseTaskId) {
-        const taskState = update.state === 'confirmed' ? 'completed' : 
-                         (update.state === 'review-pending' ? 'review-pending' : 'failed');
-        
+        let taskState;
+        if (update.state === 'confirmed') taskState = 'completed';
+        else if (update.state === 'review-pending') taskState = 'review-pending';
+        else taskState = 'failed';
+
         const taskResp = await fetch(`${DB_BASE_URL}/tasks/${job.parseTaskId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },

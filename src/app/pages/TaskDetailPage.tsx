@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, RefreshCw, FileText, Clock, AlertTriangle, CheckCircle2, Loader2, XCircle, ChevronDown, ChevronRight, Brain } from 'lucide-react';
+import {
+  ArrowLeft, RefreshCw, FileText, Clock, AlertTriangle, CheckCircle2, Loader2, XCircle,
+  ChevronDown, ChevronRight, Brain, RotateCw, Sparkles, ShieldCheck,
+} from 'lucide-react';
 import { toast } from 'sonner';
 
 /**
@@ -62,14 +65,22 @@ interface AiMetadataJob {
  */
 function getStateStyle(state: string | undefined) {
   switch (state) {
+    case 'uploading':
+    case 'pending':
+      return { badgeClass: 'bg-slate-100 text-slate-700', Icon: Clock, animate: false };
     case 'running':
     case 'result-store':
-      return { badgeClass: 'bg-blue-100 text-blue-700 border border-blue-200', Icon: Loader2, animate: true };
     case 'ai-pending':
-    case 'success':
+    case 'ai-running':
+      return { badgeClass: 'bg-blue-100 text-blue-700 border border-blue-200', Icon: Loader2, animate: true };
+    case 'review-pending':
+      return { badgeClass: 'bg-amber-100 text-amber-700 border border-amber-200', Icon: ShieldCheck, animate: false };
+    case 'completed':
       return { badgeClass: 'bg-green-100 text-green-700', Icon: CheckCircle2, animate: false };
     case 'failed':
       return { badgeClass: 'bg-red-100 text-red-700', Icon: XCircle, animate: false };
+    case 'canceled':
+      return { badgeClass: 'bg-gray-100 text-gray-500 border border-gray-200', Icon: XCircle, animate: false };
     default:
       return { badgeClass: 'bg-slate-100 text-slate-700', Icon: Clock, animate: false };
   }
@@ -84,8 +95,12 @@ function getAiJobStateStyle(state: string | undefined) {
   switch (state) {
     case 'running':
       return { badgeClass: 'bg-purple-100 text-purple-700 border border-purple-200', icon: '⏳' };
+    case 'confirmed':
+    // 兼容旧数据
     case 'succeeded':
       return { badgeClass: 'bg-green-100 text-green-700', icon: '✅' };
+    case 'review-pending':
+      return { badgeClass: 'bg-amber-100 text-amber-700 border border-amber-200', icon: '🔍' };
     case 'failed':
       return { badgeClass: 'bg-red-100 text-red-700', icon: '❌' };
     case 'pending':
@@ -167,6 +182,50 @@ export function TaskDetailPage() {
     fetchData();
   }, [id]);
 
+  // ── SSE 增量刷新（PRD v0.4 §10.2.2）──────────────────────
+  const sseRef = useRef<EventSource | null>(null);
+  useEffect(() => {
+    if (!id) return;
+    if (sseRef.current) return;
+    try {
+      const es = new EventSource(`/__proxy/upload/tasks/stream?taskId=${encodeURIComponent(id)}`);
+      sseRef.current = es;
+      es.addEventListener('task-update', () => {
+        fetchData();
+      });
+      es.onerror = () => { /* 自动重连 */ };
+    } catch (e) {
+      console.warn('[TaskDetailPage] SSE init failed', e);
+    }
+    return () => {
+      sseRef.current?.close();
+      sseRef.current = null;
+    };
+  }, [id]);
+
+  // ── 任务动作（Retry/Reparse/Re-AI/Cancel）──────────────
+  const callAction = async (action: 'retry' | 'reparse' | 're-ai' | 'cancel') => {
+    if (!id) return;
+    try {
+      const res = await fetch(`/__proxy/upload/tasks/${encodeURIComponent(id)}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const payload = await res.json().catch(() => ({} as any));
+      if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
+      const verb = { retry: '已重试', reparse: '已重新解析', 're-ai': '已触发 Re-AI', cancel: '已取消' }[action];
+      toast.success(verb, { description: payload?.newTaskId ? `新任务 ${payload.newTaskId}` : undefined });
+      if (action === 'retry' && payload?.newTaskId) {
+        navigate(`/tasks/${encodeURIComponent(payload.newTaskId)}`);
+      } else {
+        fetchData();
+      }
+    } catch (err) {
+      toast.error(`${action} 失败`, { description: String(err) });
+    }
+  };
+
   // ─── 加载中 ──────────────────────────────────────────────────
   if (loading) {
     return (
@@ -221,13 +280,48 @@ export function TaskDetailPage() {
             <p className="text-xs text-slate-400 mt-0.5 font-mono">{task.id}</p>
           </div>
         </div>
-        <button
-          onClick={fetchData}
-          className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors"
-        >
-          <RefreshCw className="w-4 h-4" />
-          刷新
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            onClick={fetchData}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors"
+            title="刷新"
+          >
+            <RefreshCw className="w-4 h-4" />
+            刷新
+          </button>
+          <button
+            onClick={() => callAction('retry')}
+            disabled={task.state !== 'failed'}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-amber-200 text-amber-700 rounded-lg text-sm font-medium hover:bg-amber-50 disabled:opacity-40 transition-colors"
+            title="Retry：内克隆新任务重跑"
+          >
+            <RotateCw className="w-4 h-4" /> Retry
+          </button>
+          <button
+            onClick={() => callAction('reparse')}
+            disabled={!['failed', 'completed', 'review-pending', 'canceled'].includes(String(task.state))}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-indigo-200 text-indigo-700 rounded-lg text-sm font-medium hover:bg-indigo-50 disabled:opacity-40 transition-colors"
+            title="Reparse：仅重跑解析阶段"
+          >
+            <RefreshCw className="w-4 h-4" /> Reparse
+          </button>
+          <button
+            onClick={() => callAction('re-ai')}
+            disabled={!['failed', 'completed', 'review-pending'].includes(String(task.state))}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-violet-200 text-violet-700 rounded-lg text-sm font-medium hover:bg-violet-50 disabled:opacity-40 transition-colors"
+            title="Re-AI：仅重跑 AI 元数据阶段"
+          >
+            <Sparkles className="w-4 h-4" /> Re-AI
+          </button>
+          <button
+            onClick={() => callAction('cancel')}
+            disabled={!['pending', 'ai-pending', 'review-pending'].includes(String(task.state))}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg text-sm font-medium hover:bg-slate-50 disabled:opacity-40 transition-colors"
+            title="Cancel"
+          >
+            <XCircle className="w-4 h-4" /> Cancel
+          </button>
+        </div>
       </div>
 
       {/* ── 状态概览卡片 ──────────────────────────────────────── */}

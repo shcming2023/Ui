@@ -1,5 +1,34 @@
 # Changelog
 
+## [milestone-prd-v0.4-wave1] - 2026-04-22
+
+### ✨ PRD v0.4 一期修订：任务流水线工程契约落地
+
+#### 状态机与联动（PRD v0.4 §6 / §7）
+- `AiMetadataWorker`：进入 Provider 调用前将关联 ParseTask 置为 `ai-running`，AI Job 终态字面量统一为 `confirmed / review-pending / failed`。
+- `upload-server` `onComplete`：修正 ParseTask 终态映射（`confirmed → completed`、`review-pending → review-pending`、`failed → failed`），不再依赖旧字面量。
+- `ParseTaskWorker`：启动时扫描失活的 `running / result-store / ai-pending` 任务，超时则置为 `failed` 并写事件。
+
+#### 任务动作 API 与 SSE（PRD v0.4 §8 / §10）
+- 新增：`POST /tasks/:id/retry | /reparse | /re-ai | /cancel | /review`、`POST /tasks/batch/retry`、`GET /tasks/stream`。
+- 新增进程内任务事件总线 `server/lib/task-events-bus.mjs`，Worker / 动作 API 统一广播 `task-update`，SSE 探针心跳保活 25s。
+
+#### 数据库与一致性扫描（PRD v0.4 §9 / §13）
+- `db-server` 启动时自动将遗留状态归一化：ParseTask `success → completed`，AiMetadataJob `succeeded → confirmed`，幂等并支持回滚。
+- `/materials` 列表排序改为 `updateTime DESC → createTime DESC → id 字典序 DESC`，不再假设 id 为数字。
+- `consistency-routes` 重写为字符串 ID 全匹配；新增 `GET /audit/consistency`、`POST /audit/consistency/apply`，覆盖 Canonical 状态、孤儿任务 / Job、悬挂 aiJobId、`ai-running` 无活跃 Job、对象存储前缀等不变量。
+
+#### 前端页面（PRD v0.4 §6.3 / §10.3）
+- `TaskManagementPage`：按 Canonical 展示桶（queued / processing / reviewing / completed / failed / canceled）重写过滤与状态标签；新增 Retry / Reparse / Re-AI / Cancel / 审核 / 批量重试 / 新建任务 按钮；接入 SSE 实时增量刷新。
+- `TaskDetailPage`：状态样式覆盖 Canonical；顶部新增动作按钮组；按 taskId 订阅 SSE 自动刷新。
+- `Layout`：左侧导航首项改为「新建任务」，图标 `PlusCircle`。
+
+#### 验证
+- `node --check` 所有改动的后端文件全部通过。
+- `tsc -p tsconfig.json --noEmit` 、 `pnpm build` 均通过，产物 `dist/assets/index-*.js ~599KB`。
+
+---
+
 ## [milestone-6.6] - 2026-04-16
 
 ### 🧩 Docker 刷新后预览修复（PDF/Markdown）

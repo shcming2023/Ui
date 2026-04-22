@@ -45,7 +45,8 @@ export class AiMetadataWorker {
     this.isRunning = false;
     this.minioContext = options.minioContext || (typeof options.getFileStream === 'function' ? options : null);
     this.onComplete = options.onComplete || null;
-    
+    this.eventBus = options.eventBus || null;
+
     // 注入诊断：确保存储上下文和回调已就绪
     const hasContext = typeof this.minioContext?.getFileStream === 'function';
     console.log(`[ai-worker] Initialized. Context: ${hasContext ? 'OK' : 'MISSING'}, Callback: ${this.onComplete ? 'YES' : 'NO'}`);
@@ -260,6 +261,24 @@ export class AiMetadataWorker {
         message: `正在使用 ${providerId} (${provider.model}) 进行识别...`
       }, 'ai-provider-request-started', 'info', requestPayload);
 
+      // 同步将关联 ParseTask 写为 ai-running（PRD v0.4 §6.1 新增显式状态）
+      if (job.parseTaskId) {
+        try {
+          await fetch(`${process.env.DB_BASE_URL || 'http://localhost:8789'}/tasks/${encodeURIComponent(job.parseTaskId)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              state: 'ai-running',
+              stage: 'ai',
+              message: `AI 识别进行中 (${providerId}/${provider.model})`,
+              updatedAt: new Date().toISOString(),
+            }),
+          });
+        } catch (e) {
+          console.warn(`[ai-worker] Failed to mark ParseTask ${job.parseTaskId} as ai-running: ${e.message}`);
+        }
+      }
+
       let aiResponse;
       try {
         aiResponse = await this.executeWithFallback(provider, markdownContent, aiSettings);
@@ -325,7 +344,7 @@ export class AiMetadataWorker {
       
       const needsReview = isLowConfidence || missingKeyFields || requireAllReview || aiResponse.fallbackOccurred;
 
-      // 7. 完成任务
+      // 7. 完成任务（Canonical 终态：confirmed / review-pending）
       const finalState = needsReview ? 'review-pending' : 'confirmed';
       const duration = Date.now() - startTime;
 
@@ -566,6 +585,21 @@ JSON 结构需包含以下字段（符合 PRD 10.5.3）：
           await this.onComplete(job, update);
         } catch (err) {
           console.error(`[ai-worker] onComplete callback failed: ${err.message}`);
+        }
+      }
+
+      // SSE 广播（PRD v0.4 §10.2.2）：将 AI Job 状态变更以 ParseTask 维度推送
+      if (this.eventBus?.emit && job.parseTaskId) {
+        try {
+          this.eventBus.emit('task-update', {
+            taskId: job.parseTaskId,
+            event: eventName,
+            level,
+            update: { aiJobId: job.id, aiJobState: update.state, ...update },
+            at: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn(`[ai-worker] eventBus emit failed: ${e.message}`);
         }
       }
     }

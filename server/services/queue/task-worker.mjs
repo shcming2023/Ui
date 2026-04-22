@@ -17,20 +17,46 @@ import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
 const POLL_INTERVAL_MS = 10000; // 10秒检查一次
 const SIMULATED_DELAY_MS = 5000; // 每个阶段模拟耗时 5秒
 
+// stale-running 自愈缓冲期（PRD v0.4 §9.3）
+const STALE_GRACE_MS = 60_000;
+// 启动后等待多久再做首次恢复扫描，确保 db-server 已就绪
+const RECOVERY_DELAY_MS = 2_000;
+
 // 约束 2: 内存队列锁，防止同一个实例中的多个 tick 重复处理
 const processingMap = new Set();
 
 export class ParseTaskWorker {
-  constructor(minioContext = null) {
+  /**
+   * @param {object|null} contextOrOptions - 兼容旧调用（传 minioContext 对象）与新调用（传 options）
+   * @param {object} [contextOrOptions.minioContext]
+   * @param {object} [contextOrOptions.eventBus] - 事件总线（用于 SSE 广播，可选）
+   */
+  constructor(contextOrOptions = null) {
+    let options = {};
+    if (contextOrOptions && (contextOrOptions.minioContext || contextOrOptions.eventBus)) {
+      options = contextOrOptions;
+    } else if (contextOrOptions?.getFileStream) {
+      options = { minioContext: contextOrOptions };
+    } else {
+      options = contextOrOptions || {};
+    }
     this.timer = null;
     this.isRunning = false;
-    this.minioContext = minioContext;
+    this.minioContext = options.minioContext
+      || (typeof options.getFileStream === 'function' ? options : null);
+    this.eventBus = options.eventBus || null;
   }
 
   start() {
     if (this.isRunning) return;
     this.isRunning = true;
-    console.log('[task-worker] ParseTask Worker started (skeleton mode)');
+    console.log('[task-worker] ParseTask Worker started');
+    // 启动后做一次延迟恢复扫描，再进入常规轮询
+    setTimeout(() => {
+      this.runRecoveryScan().catch((err) => {
+        console.error(`[task-worker] recovery scan failed: ${err.message}`);
+      });
+    }, RECOVERY_DELAY_MS);
     this.tick();
   }
 
@@ -54,13 +80,98 @@ export class ParseTaskWorker {
 
   async scanAndProcess() {
     const tasks = await getAllTasks();
-    const pendingTasks = tasks.filter(t => t.state === 'pending');
 
+    // 每轮 tick 顺便检查一次 stale-running 任务（不阻塞 pending 调度）
+    await this.recoverStaleRunningTasks(tasks);
+
+    const pendingTasks = tasks.filter(t => t.state === 'pending');
     for (const task of pendingTasks) {
       if (processingMap.has(task.id)) continue;
-      
       // 异步处理，不阻塞 tick 扫描下一个
       this.processTask(task);
+    }
+  }
+
+  /**
+   * 启动后的一次性恢复扫描（PRD v0.4 P0 §10.1.4）
+   *
+   * 处理两类 “僵尸任务”：
+   *   - 之前尚在 running/result-store 中的任务：由于本进程或 upload-server 重启而用户态信息丢失，
+   *     直接需要重新拾取，因此归位为 pending 并清理 processingMap。
+   *   - 远超超时阈值仍为 running 的任务：写入事件后同样归位 pending。
+   *
+   * 对 ai-pending 的任务本进程不接手：AiMetadataWorker 负责其自愈。
+   */
+  async runRecoveryScan() {
+    try {
+      const tasks = await getAllTasks();
+      const now = Date.now();
+      let recovered = 0;
+      for (const task of tasks) {
+        if (task.state !== 'running' && task.state !== 'result-store') continue;
+        const updatedAt = task.updatedAt ? new Date(task.updatedAt).getTime() : 0;
+        const timeoutMs = Number(task.optionsSnapshot?.localTimeout || 3600) * 1000;
+        // 若任务还在健康窗口内（不更新时间未超时），自愈时不处理；
+        // 但“本进程启动恢复”的语义是：无论时间多久，running/result-store 在启动时先归位为 pending，
+        // 由轮询重新拾取，避免重启后任务永久卡死。
+        const isExplicitlyStale = updatedAt > 0 && (now - updatedAt) > (timeoutMs + STALE_GRACE_MS);
+        await updateTask(task.id, {
+          state: 'pending',
+          stage: 'upload',
+          progress: 0,
+          message: isExplicitlyStale
+            ? `检测到卡住的解析任务，已自动重置为 pending。updatedAt=${task.updatedAt}`
+            : '服务重启恢复：在执行中的任务已重置为 pending等待重新拾取',
+          updatedAt: new Date().toISOString(),
+        });
+        await logTaskEvent({
+          taskId: task.id,
+          taskType: 'parse',
+          level: 'warn',
+          event: isExplicitlyStale ? 'stale-running-recovered' : 'restart-recovered',
+          message: isExplicitlyStale
+            ? '检测到卡住的解析任务，已自动重置为 pending'
+            : '检测到重启前的运行中任务，已重置为 pending 重新拾取',
+          payload: { previousState: task.state, previousUpdatedAt: task.updatedAt },
+        });
+        processingMap.delete(task.id);
+        recovered += 1;
+      }
+      if (recovered > 0) {
+        console.log(`[task-worker] recovery scan: reset ${recovered} running/result-store tasks to pending`);
+      }
+    } catch (err) {
+      console.error(`[task-worker] runRecoveryScan error: ${err.message}`);
+    }
+  }
+
+  /**
+   * 日常轮询时的超时自愈：对 running/result-store 持续超时的任务自动重置为 pending
+   */
+  async recoverStaleRunningTasks(tasks) {
+    const now = Date.now();
+    for (const task of tasks) {
+      if (task.state !== 'running' && task.state !== 'result-store') continue;
+      if (processingMap.has(task.id)) continue; // 本进程正在处理的不干预
+      const updatedAt = task.updatedAt ? new Date(task.updatedAt).getTime() : 0;
+      if (!updatedAt) continue;
+      const timeoutMs = Number(task.optionsSnapshot?.localTimeout || 3600) * 1000;
+      if ((now - updatedAt) <= (timeoutMs + STALE_GRACE_MS)) continue;
+      await updateTask(task.id, {
+        state: 'pending',
+        stage: 'upload',
+        progress: 0,
+        message: `检测到卡住的解析任务（超过 ${Math.round((timeoutMs + STALE_GRACE_MS) / 1000)}s不更新），已重置为 pending`,
+        updatedAt: new Date().toISOString(),
+      });
+      await logTaskEvent({
+        taskId: task.id,
+        taskType: 'parse',
+        level: 'warn',
+        event: 'stale-running-recovered',
+        message: '日常扫描发现运行超时，已重置为 pending',
+        payload: { previousState: task.state, previousUpdatedAt: task.updatedAt, timeoutMs },
+      });
     }
   }
 
@@ -273,6 +384,20 @@ export class ParseTaskWorker {
         message: update.message || `Status changed to ${update.state}`,
         payload: update
       });
+      // SSE 事件广播（若已注入事件总线）
+      if (this.eventBus?.emit) {
+        try {
+          this.eventBus.emit('task-update', {
+            taskId: task.id,
+            event: eventName,
+            level,
+            update,
+            at: new Date().toISOString(),
+          });
+        } catch (e) {
+          console.warn(`[task-worker] eventBus emit failed: ${e.message}`);
+        }
+      }
     }
   }
 

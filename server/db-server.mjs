@@ -405,7 +405,17 @@ app.use((req, res, next) => {
 // ─── Materials ────────────────────────────────────────────────
 
 app.get('/materials', (_req, res) => {
-  const list = Object.values(dbCache.materials).sort((a, b) => b.id - a.id);
+  // PRD v0.4 §9.1 · 10.4.1：Material.id 为字符串，不允许数字排序。
+  // 根据 updateTime DESC，其次 createTime DESC，最后 fallback id 的字典序倒序。
+  const list = Object.values(dbCache.materials).sort((a, b) => {
+    const ua = Number(a?.updateTime || 0);
+    const ub = Number(b?.updateTime || 0);
+    if (ua !== ub) return ub - ua;
+    const ca = Number(a?.createTime || 0);
+    const cb = Number(b?.createTime || 0);
+    if (ca !== cb) return cb - ca;
+    return String(b?.id || '').localeCompare(String(a?.id || ''));
+  });
   res.json(list);
 });
 
@@ -891,7 +901,39 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: 'internal server error', detail: err.message });
 });
 
-// ─── 启动 ─────────────────────────────────────────────────────
+// ─── 一次性状态字面量归一化迁移（PRD v0.4 §13.1 ‑ 缓解2）──────────────────────────────────
+// 启动时将数据库中已知的旧状态字面量归一化为 Canonical 值。幂等、安全，查不到任何需要更改的字段时不写盘。
+function normalizeCanonicalStatesOnStartup() {
+  let dirty = false;
+  // ParseTask：success → completed
+  for (const t of Object.values(dbCache.parseTasks || {})) {
+    if (t?.state === 'success') {
+      t.state = 'completed';
+      t.message = (t.message || '') + ' [startup-migration: success→completed]';
+      dirty = true;
+    }
+  }
+  // AiMetadataJob：succeeded → confirmed
+  for (const j of Object.values(dbCache.aiMetadataJobs || {})) {
+    if (j?.state === 'succeeded') {
+      j.state = 'confirmed';
+      j.message = (j.message || '') + ' [startup-migration: succeeded→confirmed]';
+      dirty = true;
+    }
+  }
+  if (dirty) {
+    console.log('[db-server] startup-migration: normalized legacy states');
+    writeDB();
+  }
+}
+
+// ─── 启动 ─────────────────────────────────────────────
+
+try {
+  normalizeCanonicalStatesOnStartup();
+} catch (e) {
+  console.error('[db-server] startup-migration failed (non-fatal):', e.message);
+}
 
 const server = app.listen(port, () => {
   console.log(`[db-server] listening on http://localhost:${port}`);
