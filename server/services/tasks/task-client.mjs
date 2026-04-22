@@ -43,3 +43,18 @@ export async function updateTask(taskId, updateData) {
     return false;
   }
 }
+
+export async function updateMaterial(materialId, updateData) {
+  try {
+    const resp = await fetch(`${DB_BASE_URL}/materials/${encodeURIComponent(materialId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updateData)
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return true;
+  } catch (error) {
+    console.error(`[task-client] updateMaterial failed: ${error.message}`);
+    return false;
+  }
+}

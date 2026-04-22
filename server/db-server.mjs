@@ -599,23 +599,40 @@ app.get('/tasks/:id', (req, res) => {
 app.post('/tasks', (req, res) => {
   const item = req.body;
   if (!item?.id) { res.status(400).json({ error: '缺少 id' }); return; }
-  dbCache.parseTasks[item.id] = {
+  const sid = String(item.id);
+  const isNew = !dbCache.parseTasks[sid];
+
+  dbCache.parseTasks[sid] = {
     createdAt: new Date().toISOString(),
     ...item
   };
   writeDB();
   
-  // 记录一条创建事件
-  const eventId = `evt-${Date.now()}`;
-  dbCache.taskEvents[eventId] = {
-    id: eventId,
-    taskId: item.id,
-    taskType: 'parse',
-    level: 'info',
-    event: 'created',
-    message: '解析任务已由 upload-server 创建，正进入处理队列',
-    createdAt: new Date().toISOString()
-  };
+  if (isNew) {
+    // 记录一条创建事件
+    const eventId = `evt-${Date.now()}`;
+    dbCache.taskEvents[eventId] = {
+      id: eventId,
+      taskId: sid,
+      taskType: 'parse',
+      level: 'info',
+      event: 'created',
+      message: '解析任务已由 upload-server 创建，正进入处理队列',
+      createdAt: new Date().toISOString()
+    };
+  } else {
+    // 如果是覆盖场景，记一个 updated 事件（可选）
+    const eventId = `evt-${Date.now()}-upd`;
+    dbCache.taskEvents[eventId] = {
+      id: eventId,
+      taskId: sid,
+      taskType: 'parse',
+      level: 'info',
+      event: 'updated',
+      message: '解析任务配置已更新（Upsert 覆盖）',
+      createdAt: new Date().toISOString()
+    };
+  }
   
   res.json({ ok: true, id: item.id });
 });
@@ -905,7 +922,7 @@ app.use((err, _req, res, _next) => {
 // 启动时将数据库中已知的旧状态字面量归一化为 Canonical 值。幂等、安全，查不到任何需要更改的字段时不写盘。
 function normalizeCanonicalStatesOnStartup() {
   let dirty = false;
-  // ParseTask：success → completed
+  // 1. ParseTask：success → completed
   for (const t of Object.values(dbCache.parseTasks || {})) {
     if (t?.state === 'success') {
       t.state = 'completed';
@@ -913,7 +930,7 @@ function normalizeCanonicalStatesOnStartup() {
       dirty = true;
     }
   }
-  // AiMetadataJob：succeeded → confirmed
+  // 2. AiMetadataJob：succeeded → confirmed
   for (const j of Object.values(dbCache.aiMetadataJobs || {})) {
     if (j?.state === 'succeeded') {
       j.state = 'confirmed';
@@ -921,8 +938,45 @@ function normalizeCanonicalStatesOnStartup() {
       dirty = true;
     }
   }
+
+  // 3. 修复 Task 与 Material 状态不同步 (Requirement 5)
+  // 当 Task 已完成且 AI 已确认，但 Material 仍停留在 processing 或缺少 mineruStatus 时进行补齐
+  const confirmedAiJobsByTaskId = {};
+  for (const j of Object.values(dbCache.aiMetadataJobs || {})) {
+    if (j.state === 'confirmed' && j.parseTaskId) {
+      confirmedAiJobsByTaskId[j.parseTaskId] = j;
+    }
+  }
+
+  for (const t of Object.values(dbCache.parseTasks || {})) {
+    if (t.state === 'completed' && t.materialId) {
+      const m = dbCache.materials[String(t.materialId)];
+      const j = confirmedAiJobsByTaskId[t.id];
+      
+      if (m && j) {
+        let matDirty = false;
+        if (m.status === 'processing') {
+          m.status = 'completed';
+          matDirty = true;
+        }
+        if (m.mineruStatus !== 'completed') {
+          m.mineruStatus = 'completed';
+          matDirty = true;
+        }
+        if (m.aiStatus !== 'analyzed') {
+          m.aiStatus = 'analyzed';
+          matDirty = true;
+        }
+        if (matDirty) {
+          console.log(`[db-server] startup-migration: synced material ${m.id} to completed state`);
+          dirty = true;
+        }
+      }
+    }
+  }
+
   if (dirty) {
-    console.log('[db-server] startup-migration: normalized legacy states');
+    console.log('[db-server] startup-migration: normalized legacy states and synced materials');
     writeDB();
   }
 }

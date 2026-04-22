@@ -8,7 +8,7 @@
  * 4. 解析完成后自动创建 AI Metadata Job（含去重保护）
  */
 
-import { getAllTasks, updateTask } from '../tasks/task-client.mjs';
+import { getAllTasks, updateTask, updateMaterial } from '../tasks/task-client.mjs';
 import { logTaskEvent } from '../logging/task-events.mjs';
 import { processWithLocalMinerU } from '../mineru/local-adapter.mjs';
 import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
@@ -236,6 +236,18 @@ export class ParseTaskWorker {
           },
           completedAt: new Date().toISOString()
         }, 'worker-completed');
+
+        // 补齐 Material 状态：确保 AI 阶段开始前，Material 表达“解析阶段完成” (Requirement 3)
+        await updateMaterial(task.materialId, {
+          mineruStatus: 'completed',
+          metadata: {
+            ...(materialInfo.metadata || {}),
+            markdownObjectName,
+            processingStage: 'ai',
+            processingMsg: '解析完成，等待 AI 元数据识别',
+            processingUpdatedAt: new Date().toISOString()
+          }
+        });
 
         // ── 解析成功后自动创建 AI Metadata Job ──────────────────
         await this.tryCreateAiJob(task, markdownObjectName);

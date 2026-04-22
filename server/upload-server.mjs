@@ -3471,20 +3471,50 @@ const aiWorker = new AiMetadataWorker({
       if (!materialId) {
         console.warn(`[upload-server] AI Job ${job.id} has no materialId, skipping material backfill`);
       } else {
-        // 2. 构造 Material 更新数据
-        // 状态映射：confirmed -> analyzed, review-pending -> analyzed (待审), failed -> failed
-        const aiStatus = (update.state === 'confirmed' || update.state === 'review-pending') ? 'analyzed' : 'failed';
+        // 2. 获取原有 Material 数据（合并 metadata 需要）
+        let existingMaterial = {};
+        try {
+          const mResp = await fetch(`${DB_BASE_URL}/materials/${materialId}`);
+          if (mResp.ok) existingMaterial = await mResp.json();
+        } catch (e) {
+          console.warn(`[upload-server] Failed to fetch existing material ${materialId}: ${e.message}`);
+        }
+
+        // 3. 构造 Material 更新数据 (Requirement 1)
+        let status = 'processing';
+        let mineruStatus = 'completed'; // AI 能跑说明 MinerU 肯定完了
+        let aiStatus = 'analyzed';
         
+        if (update.state === 'confirmed') {
+          status = 'completed';
+          aiStatus = 'analyzed';
+        } else if (update.state === 'review-pending') {
+          status = 'processing'; // 待审中仍算 processing
+          aiStatus = 'analyzed';
+        } else if (update.state === 'failed') {
+          status = 'failed';
+          aiStatus = 'failed';
+        }
+
         const materialUpdates = {
+          status,
+          mineruStatus,
           aiStatus,
           metadata: {
+            ...(existingMaterial.metadata || {}),
             ...(update.result || {}),
+            processingStage: update.state === 'confirmed' ? 'done' : update.state === 'review-pending' ? 'review' : 'ai',
+            processingMsg: update.state === 'confirmed'
+              ? 'AI 识别完成'
+              : update.state === 'review-pending'
+                ? 'AI 识别完成，待人工复核'
+                : 'AI 识别失败',
             aiJobId: job.id,
             aiAnalyzedAt: new Date().toISOString()
           }
         };
 
-        // 3. 同步到 db-server (Materials)
+        // 4. 同步到 db-server (Materials)
         const matResp = await fetch(`${DB_BASE_URL}/materials/${materialId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -3493,11 +3523,7 @@ const aiWorker = new AiMetadataWorker({
         if (!matResp.ok) console.error(`[upload-server] Failed to backfill Material ${materialId}: ${matResp.status}`);
       }
 
-      // 4. 同步到 db-server (ParseTask) - 推进状态到终态
-      // 状态映射（PRD v0.4 §6.1/§6.2）：
-      //   AiJob.confirmed       → ParseTask.completed
-      //   AiJob.review-pending  → ParseTask.review-pending
-      //   AiJob.failed          → ParseTask.failed
+      // 5. 同步到 db-server (ParseTask) - 推进状态到终态 (Requirement 2)
       if (job.parseTaskId) {
         let taskState;
         if (update.state === 'confirmed') taskState = 'completed';
@@ -3509,7 +3535,9 @@ const aiWorker = new AiMetadataWorker({
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             state: taskState,
+            stage: taskState === 'completed' ? 'done' : taskState === 'review-pending' ? 'review' : 'ai',
             message: `AI 识别完成: ${update.state}${update.needsReview ? ' (待人工复核)' : ''}`,
+            completedAt: new Date().toISOString(),
             metadata: {
               ...(update.result || {}),
               aiCompletedAt: new Date().toISOString()
