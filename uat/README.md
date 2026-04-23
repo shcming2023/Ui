@@ -261,6 +261,9 @@ BASE_URL=http://127.0.0.1:8081 bash uat/smoke-test.sh
 # 执行完整 Pipeline 一致性 E2E（Playwright）
 cd uat && BASE_URL=http://127.0.0.1:8081 npx playwright test tests/pipeline-consistency.spec.ts
 
+# 执行页面可用性回归（防止 React 运行时崩溃）
+cd uat && BASE_URL=http://127.0.0.1:8081 npx playwright test tests/pages-smoke.spec.ts
+
 # 查看数据一致性审计结果 (Dry-run)
 curl -sS http://127.0.0.1:8081/__proxy/upload/audit/consistency
 ```
