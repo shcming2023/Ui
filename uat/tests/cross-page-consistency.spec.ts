@@ -13,7 +13,7 @@ test.describe('Cross-Page Consistency (ParseTask Truth)', () => {
 
   test.beforeAll(async ({ request }) => {
     // 1. 创建素材
-    const uploadResp = await request.post(`${BASE_URL}/__proxy/upload/upload`, {
+    const uploadResp = await request.post('/__proxy/upload/upload', {
       multipart: {
         file: {
           name: 'consistency-test.pdf',
@@ -27,7 +27,7 @@ test.describe('Cross-Page Consistency (ParseTask Truth)', () => {
     materialId = uploadData.materialId;
 
     // 2. 创建一个 Pending 任务
-    const taskResp = await request.post(`${BASE_URL}/__proxy/upload/tasks`, {
+    const taskResp = await request.post('/__proxy/upload/tasks', {
       multipart: {
         materialId: String(materialId),
         objectName: uploadData.objectName
@@ -41,21 +41,21 @@ test.describe('Cross-Page Consistency (ParseTask Truth)', () => {
 
   test('Status Consistency: Pending Stage', async ({ page }) => {
     // A. 工作台检查
-    await page.goto(`${BASE_URL}/workspace`);
+    await page.goto(`${BASE_URL}/cms/workspace`);
     const wsRow = page.locator(`tr:has-text("${materialId}")`);
     // 预期显示 "等待中" (queued bucket)
     await expect(wsRow.getByText(/等待中|解析中/)).toBeVisible();
     await expect(wsRow.getByText(taskId.slice(0, 8))).toBeVisible();
 
     // B. 资产详情页检查
-    await page.goto(`${BASE_URL}/asset/${materialId}`);
+    await page.goto(`${BASE_URL}/cms/asset/${materialId}`);
     const detailStatus = page.locator('.flex.items-center.gap-2 span.rounded-full');
     await expect(detailStatus).toBeVisible();
     // 资产详情页应该显示任务卡片
     await expect(page.getByText(`Task ID: ${taskId}`)).toBeVisible();
 
     // C. 任务列表检查
-    await page.goto(`${BASE_URL}/tasks`);
+    await page.goto(`${BASE_URL}/cms/tasks`);
     const taskRow = page.locator(`tr:has-text("${taskId}")`);
     await expect(taskRow).toBeVisible();
     await expect(taskRow.getByText(/pending|waiting|等待中/i)).toBeVisible();
@@ -63,22 +63,22 @@ test.describe('Cross-Page Consistency (ParseTask Truth)', () => {
 
   test('Status Consistency: Failure Stage', async ({ request, page }) => {
     // 1. 手动将任务设为失败
-    await request.post(`${BASE_URL}/__proxy/db/tasks/${taskId}`, {
+    await request.post(`/__proxy/db/tasks/${taskId}`, {
       data: { state: 'failed', errorMessage: 'Consistency Test Failure' }
     });
 
     // A. 工作台检查
-    await page.goto(`${BASE_URL}/workspace`);
+    await page.goto(`${BASE_URL}/cms/workspace`);
     const wsRow = page.locator(`tr:has-text("${materialId}")`);
     await expect(wsRow.getByText('失败')).toBeVisible();
 
     // B. 资产详情页检查
-    await page.goto(`${BASE_URL}/asset/${materialId}`);
+    await page.goto(`${BASE_URL}/cms/asset/${materialId}`);
     await expect(page.getByText('失败')).toBeVisible();
     await expect(page.getByText('Consistency Test Failure')).toBeVisible();
 
     // C. 任务列表检查
-    await page.goto(`${BASE_URL}/tasks`);
+    await page.goto(`${BASE_URL}/cms/tasks`);
     const taskRow = page.locator(`tr:has-text("${taskId}")`);
     await expect(taskRow.getByText('failed', { exact: false })).toBeVisible();
   });

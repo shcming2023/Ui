@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Pencil, Clock } from 'lucide-react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
+import { ArrowLeft, Pencil, Clock, Eye } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAppStore } from '../../store/appContext';
 import { StatusBadge } from '../components/StatusBadge';
@@ -167,7 +167,7 @@ export function AssetDetailPage() {
   ]);
 
   useEffect(() => {
-    setTitleDraft(material?.title || detail?.title ?? '');
+    setTitleDraft((material?.title || detail?.title) ?? '');
   }, [material?.title, detail?.title]);
 
   const updateMeta = (key: keyof typeof metaForm, val: string) =>
@@ -277,7 +277,7 @@ export function AssetDetailPage() {
     }
   };
 
-  if (!detail) {
+  if (!material && !detail) {
     return (
       <div className="p-6">
         <button
@@ -383,26 +383,7 @@ export function AssetDetailPage() {
     if (view.currentTask) {
       await handleTaskAction(view.currentTask.id, 're-ai');
     } else if (material?.metadata?.markdownObjectName || material?.metadata?.markdownUrl) {
-        // 如果没有任务记录但有解析产物，可以尝试创建一个已完成的占位任务再重跑 AI
-        toast.info('尝试建立新任务并启动 AI 分析...');
-        const newTaskId = `task-${Date.now()}`;
-        try {
-            await fetch('/__proxy/db/tasks', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    id: newTaskId,
-                    materialId: numId,
-                    state: 'completed',
-                    stage: 'mineru',
-                    engine: 'local-mineru',
-                    createdAt: new Date().toISOString()
-                })
-            });
-            await handleTaskAction(newTaskId, 're-ai');
-        } catch (e) {
-            toast.error('创建任务失败');
-        }
+      toast.info('未找到关联任务，请重新解析以建立追踪关系');
     } else {
       toast.error('请先完成 MinerU 解析');
     }

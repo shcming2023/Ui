@@ -40,6 +40,7 @@ const BUCKET_LABELS: Record<BucketKey, string> = {
   completed: '已完成',
   failed: '已失败',
   canceled: '已取消',
+  unknown: '未知',
 };
 
 function bucketOf(state: string | undefined): BucketKey {
@@ -232,7 +233,7 @@ export function TaskManagementPage() {
   const counts = useMemo(() => {
     const c: Record<BucketKey, number> = {
       all: tasks.length,
-      queued: 0, processing: 0, reviewing: 0, completed: 0, failed: 0, canceled: 0,
+      queued: 0, processing: 0, reviewing: 0, completed: 0, failed: 0, canceled: 0, unknown: 0,
     };
     for (const t of tasks) c[bucketOf(t.state)] += 1;
     return c;
