@@ -3,7 +3,7 @@ import { test, expect, type Page } from '@playwright/test';
 /**
  * Pages Smoke Test — 页面级运行时可用性检测
  * 
- * 目标：防止出现“HTTP 200 但 React 崩溃（ReferenceError 等）”的回归事故。
+ * 目标：防止出现"HTTP 200 但 React 崩溃（ReferenceError 等）"的回归事故。
  * 覆盖：Tasks, Audit, Ops Health, Materials, Library 等核心页面。
  */
 
@@ -79,11 +79,13 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
   test('Task Detail page should render without crash', async ({ page, request }) => {
     // 1. 先测不存在的 ID (检查空态渲染)
     await page.goto(`${BASE_URL}/cms/tasks/non-existent-id`);
-    await page.waitForSelector('main', { timeout: 10000 });
-    let bodyText = await page.innerText('body');
+    
+    // 显式等待空态文本出现，避免异步加载未完成的 flaky
+    await expect(page.getByText('任务不存在')).toBeVisible({ timeout: 10000 });
+    
+    const bodyText = await page.innerText('body');
     expect(bodyText).not.toContain('ReferenceError');
     expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
-    expect(bodyText).toContain('任务不存在');
 
     // 2. 尝试测一个真实的 ID (检查数据驱动渲染)
     const res = await request.get(`${BASE_URL}/__proxy/db/tasks`);
