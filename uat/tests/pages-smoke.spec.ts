@@ -79,10 +79,10 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
   test('Task Detail page should render without crash', async ({ page, request }) => {
     // 1. 先测不存在的 ID (检查空态渲染)
     await page.goto(`${BASE_URL}/cms/tasks/non-existent-id`);
-    
+
     // 显式等待空态文本出现，避免异步加载未完成的 flaky
     await expect(page.getByText('任务不存在')).toBeVisible({ timeout: 10000 });
-    
+
     let bodyText = await page.innerText('body');
     expect(bodyText).not.toContain('ReferenceError');
     expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
@@ -95,18 +95,70 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
         const realId = tasks[0].id;
         console.log(`Testing real task detail: ${realId}`);
         await page.goto(`${BASE_URL}/cms/tasks/${realId}`);
-        
+
         // 显式等待 Tab 结构出现，避免异步加载未完成的 flaky
         await expect(page.getByText('概览')).toBeVisible({ timeout: 10000 });
-        
+
         bodyText = await page.innerText('body');
         expect(bodyText).not.toContain('ReferenceError');
         expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
-        
+
         // W2 断言：必须看到 Tab 结构
         expect(bodyText).toContain('Markdown');
         expect(bodyText).toContain('元数据');
         expect(bodyText).toContain('事件日志');
+      }
+    }
+  });
+
+  test('Asset Detail page should render without crash', async ({ page, request }) => {
+    // 1. 先测不存在的 ID (检查空态渲染)
+    await page.goto(`${BASE_URL}/cms/asset/999999999`);
+
+    // 显式等待空态文本出现，避免异步加载未完成的 flaky
+    await expect(page.getByText('不存在或已被删除')).toBeVisible({ timeout: 10000 });
+
+    let bodyText = await page.innerText('body');
+    expect(bodyText).not.toContain('ReferenceError');
+    expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
+
+    // 2. 尝试测一个真实的 ID (检查数据驱动渲染)
+    const res = await request.get(`${BASE_URL}/__proxy/db/materials`);
+    if (res.ok()) {
+      const materials = await res.json();
+      if (Array.isArray(materials) && materials.length > 0) {
+        // 筛选出能被 /cms/asset/{id} 正常打开的资产
+        // AssetDetailPage 期望 id 为数字，避免字符串型 UAT ID 导致显示"不存在或已删除"
+        const validMaterials = materials.filter((m) => {
+          const id = String(m.id);
+          // 排除非数字 ID（如 UAT 字符串 ID）
+          return /^\d+$/.test(id);
+        });
+
+        if (validMaterials.length > 0) {
+          const realMaterialId = validMaterials[0].id;
+          console.log(`Testing real asset detail: ${realMaterialId}`);
+          await page.goto(`${BASE_URL}/cms/asset/${realMaterialId}`);
+
+          // 显式等待关键内容出现，避免异步加载未完成的 flaky
+          await expect(page.getByText('返回工作台')).toBeVisible({ timeout: 10000 });
+
+          bodyText = await page.innerText('body');
+          expect(bodyText).not.toContain('ReferenceError');
+          expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
+          expect(bodyText).not.toContain('is not defined');
+          expect(bodyText).not.toContain('ErrorBoundary');
+
+          // 正面断言：资产详情页稳定内容
+          expect(bodyText).toContain('返回工作台');
+          // 资产标题或文件名至少出现一个
+          const hasTitle = validMaterials[0].title ? bodyText.includes(validMaterials[0].title) : false;
+          const hasFileName = validMaterials[0].fileName ? bodyText.includes(validMaterials[0].fileName) : false;
+          expect(hasTitle || hasFileName, '页面应显示资产标题或文件名').toBeTruthy();
+        } else {
+          // 如果找不到任何真实可用资产，明确 skip
+          test.skip(true, '未找到可用的数字型 material ID，跳过真实资产详情页测试');
+        }
       }
     }
   });
