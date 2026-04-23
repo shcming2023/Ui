@@ -452,7 +452,7 @@ export function AssetDetailPage() {
               />
             ) : (
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-gray-900">{material?.title || detail.title}</h1>
+                <h1 className="text-xl font-bold text-gray-900">{material?.title || detail?.title || '未命名资产'}</h1>
                 <button
                   onClick={() => setEditingTitle(true)}
                   className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg"
@@ -463,7 +463,7 @@ export function AssetDetailPage() {
               </div>
             )}
             <p className="text-xs text-gray-400 mt-1">
-              资产 ID：{detail.assetId} 
+              资产 ID：{numId} 
               {material?.metadata?.fileName && ` · 文件名：${material.metadata.fileName}`}
             </p>
           </div>
@@ -652,11 +652,11 @@ export function AssetDetailPage() {
             )}
           </div>
 
-          {detail.relatedAssets.length > 0 && (
+          {detail?.relatedAssets && detail.relatedAssets.length > 0 && (
             <div className="bg-white rounded-xl border border-gray-200 p-5">
               <h2 className="font-semibold text-gray-800 mb-3">相关资产</h2>
               <div className="space-y-2">
-                {detail.relatedAssets.map((ra) => (
+                {detail.relatedAssets.map((ra: any) => (
                   <div
                     key={ra.id}
                     onClick={() => navigate(`/asset/${ra.id}`)}
