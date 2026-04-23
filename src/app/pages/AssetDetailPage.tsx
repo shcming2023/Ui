@@ -62,6 +62,7 @@ export function AssetDetailPage() {
   const mineruRetryCount = 0;
 
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
+  const [submittingMineru, setSubmittingMineru] = useState(false);
   const [relatedTasks, setRelatedTasks] = useState<Array<{id: string; state: string; engine?: string}>>([]);
 
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
@@ -278,6 +279,7 @@ export function AssetDetailPage() {
 
   const handleMineruParse = async () => {
     if (!material) { toast.error('找不到资料信息'); return; }
+    if (submittingMineru || material.mineruStatus === 'processing') return;
 
     let objectName = String(material.metadata?.objectName || '').trim();
     const fileUrl = String(material.metadata?.fileUrl || '').trim();
@@ -285,6 +287,8 @@ export function AssetDetailPage() {
       toast.error('文件尚未上传或缺少访问地址');
       return;
     }
+
+    setSubmittingMineru(true);
 
     try {
       // 如果没有 objectName 但有 fileUrl，先上传到 MinIO
@@ -346,6 +350,17 @@ export function AssetDetailPage() {
       });
       if (!res.ok) {
         const errData = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        if (res.status === 409 && (errData as any).code === 'TASK_ALREADY_ACTIVE') {
+          const existingTaskId = (errData as any).existingTaskId;
+          toast.info('当前已有进行中的任务', {
+            action: {
+              label: '查看任务',
+              onClick: () => navigate(`/tasks/${existingTaskId}`)
+            }
+          });
+          setSubmittingMineru(false);
+          return;
+        }
         throw new Error((errData as { error?: string }).error || `HTTP ${res.status}`);
       }
 
@@ -373,6 +388,8 @@ export function AssetDetailPage() {
       const msg = err instanceof Error ? err.message : '未知错误';
       dispatch({ type: 'UPDATE_MATERIAL_MINERU_STATUS', payload: { id: numId, mineruStatus: 'failed' } });
       toast.error(`MinerU 解析失败: ${msg}`);
+    } finally {
+      setSubmittingMineru(false);
     }
   };
 
@@ -606,7 +623,7 @@ export function AssetDetailPage() {
             originalUrl={originalUrl}
             onRefreshOriginalUrl={handleRefreshOriginalUrl}
             mineruEngineLabel={'本地 FastAPI'}
-            mineruRunning={mineruRunning}
+            mineruRunning={submittingMineru || mineruRunning}
             mineruProgress={mineruProgress}
             mineruProgressMsg={mineruProgressMsg}
             mineruRetryCount={mineruRetryCount}

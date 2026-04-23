@@ -2065,6 +2065,35 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
     }
 
     const materialId = (req.body?.materialId || `mat-${Date.now()}`).toString();
+
+    // 0. 幂等检查：防止同一素材重复创建活跃任务
+    try {
+      const allTasksResp = await fetch(`${DB_BASE_URL}/tasks`);
+      if (allTasksResp.ok) {
+        const allTasks = await allTasksResp.json();
+        const activeStates = new Set(['pending', 'running', 'ai-pending', 'ai-running', 'review-pending']);
+        const existingActiveTask = allTasks.find(t => 
+          String(t.materialId) === materialId && 
+          activeStates.has(t.state)
+        );
+
+        if (existingActiveTask) {
+          // 清理已上传的临时文件（由 multer 生成）
+          if (req.file) cleanupTempFile(req.file);
+          
+          return res.status(409).json({
+            ok: false,
+            code: 'TASK_ALREADY_ACTIVE',
+            existingTaskId: existingActiveTask.id,
+            state: existingActiveTask.state,
+            message: '当前素材已有进行中的任务'
+          });
+        }
+      }
+    } catch (e) {
+      console.warn(`[upload-server] /tasks: 幂等检查查询失败: ${e.message}`);
+      // 容错处理：查询失败时暂不拦截，继续创建
+    }
     const taskId = `task-${Date.now()}`;
     
     // 1. 上传文件到 MinIO
