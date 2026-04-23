@@ -2191,7 +2191,21 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       body: dbTaskBody
     });
     const dbTaskResult = await dbTaskResp.json().catch(() => null);
-    if (!dbTaskResp.ok) throw new Error(`同步 ParseTask 到 db-server 失败: ${dbTaskResult?.error || 'unknown'}`);
+    
+    if (!dbTaskResp.ok) {
+      if (dbTaskResp.status === 409 && dbTaskResult?.error === 'TASK_ALREADY_ACTIVE') {
+        // [P0] 并发穿透补位：DB 返回冲突，说明并发请求中另一个已成功创建任务
+        if (req.file) cleanupTempFile(req.file);
+        return res.status(409).json({
+          ok: false,
+          code: 'TASK_ALREADY_ACTIVE',
+          existingTaskId: dbTaskResult.existingTaskId,
+          state: dbTaskResult.state,
+          message: '当前素材已有进行中的任务'
+        });
+      }
+      throw new Error(`同步 ParseTask 到 db-server 失败: ${dbTaskResult?.error || 'unknown'}`);
+    }
 
     // 生成预签名 URL 供前端使用 (Requirement 5)
     let presignedUrl = '';

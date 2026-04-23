@@ -606,6 +606,23 @@ app.post('/tasks', (req, res) => {
   const sid = String(item.id);
   const isNew = !dbCache.parseTasks[sid];
 
+  // [P0 并发幂等控制] 仅针对新任务创建
+  if (isNew && item.materialId) {
+    const activeStates = new Set(['pending', 'running', 'ai-pending', 'ai-running', 'review-pending']);
+    const existingActiveTask = Object.values(dbCache.parseTasks).find(t => 
+      String(t.materialId) === String(item.materialId) && activeStates.has(t.state)
+    );
+
+    if (existingActiveTask) {
+      console.warn(`[db-server] 并发冲突拒绝：Material ${item.materialId} 已有活跃任务 ${existingActiveTask.id}`);
+      return res.status(409).json({ 
+        error: 'TASK_ALREADY_ACTIVE', 
+        existingTaskId: existingActiveTask.id,
+        state: existingActiveTask.state 
+      });
+    }
+  }
+
   dbCache.parseTasks[sid] = {
     createdAt: new Date().toISOString(),
     ...item
