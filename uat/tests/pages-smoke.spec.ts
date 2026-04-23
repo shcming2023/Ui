@@ -83,7 +83,7 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
     // 显式等待空态文本出现，避免异步加载未完成的 flaky
     await expect(page.getByText('任务不存在')).toBeVisible({ timeout: 10000 });
     
-    const bodyText = await page.innerText('body');
+    let bodyText = await page.innerText('body');
     expect(bodyText).not.toContain('ReferenceError');
     expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
 
