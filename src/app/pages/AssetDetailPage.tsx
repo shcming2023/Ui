@@ -62,6 +62,7 @@ export function AssetDetailPage() {
   const mineruRetryCount = 0;
 
   const [aiAnalyzing, setAiAnalyzing] = useState(false);
+  const [relatedTasks, setRelatedTasks] = useState<Array<{id: string; state: string; engine?: string}>>([]);
 
   const [originalUrl, setOriginalUrl] = useState<string | null>(null);
   const originalRefreshTimerRef = useRef<number | null>(null);
@@ -177,6 +178,20 @@ export function AssetDetailPage() {
     || metaForm.type !== (material.metadata?.type || '')
     || metaForm.summary !== (material.metadata?.summary || '')
   );
+
+  // ── W2-4: 获取关联任务列表 ────────────────────────────────
+  useEffect(() => {
+    if (!numId) return;
+    const fetchRelatedTasks = async () => {
+      try {
+        const res = await fetch('/__proxy/db/tasks');
+        if (!res.ok) return;
+        const all: Array<{id: string; materialId?: string | number; state: string; engine?: string}> = await res.json();
+        setRelatedTasks(all.filter(t => String(t.materialId) === String(numId)));
+      } catch {}
+    };
+    fetchRelatedTasks();
+  }, [numId, material?.mineruStatus, material?.aiStatus]);
 
   useEffect(() => {
     if (!isDirty) return;
@@ -601,6 +616,47 @@ export function AssetDetailPage() {
             onAiAnalyze={handleAiAnalyze}
             aiDisabledReason={(!material?.metadata?.markdownObjectName && !material?.metadata?.markdownUrl && !material?.mineruZipUrl && !mineruMarkdown) ? '请先完成 MinerU 解析' : ''}
           />
+
+          {/* W2-4: 关联任务卡片 */}
+          <div className="bg-white rounded-xl border border-gray-200 p-5">
+            <div className="flex items-center justify-between mb-3">
+              <h2 className="font-semibold text-gray-800 flex items-center gap-2">
+                <Clock size={16} className="text-blue-500" /> 关联任务
+              </h2>
+              <span className="text-[10px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-500 font-mono">
+                {relatedTasks.length}
+              </span>
+            </div>
+            {relatedTasks.length === 0 ? (
+              <p className="text-xs text-slate-400 text-center py-4">暂无关联任务</p>
+            ) : (
+              <div className="space-y-2">
+                {relatedTasks.map((t) => (
+                  <div
+                    key={t.id}
+                    onClick={() => navigate(`/tasks/${t.id}`)}
+                    className="flex items-center justify-between p-2.5 rounded-lg border border-slate-100 hover:border-blue-200 hover:bg-blue-50/30 cursor-pointer transition-all group"
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-mono font-bold text-slate-700 group-hover:text-blue-700 truncate">{t.id}</p>
+                      <p className="text-[10px] text-slate-400 mt-0.5 capitalize">{t.engine || 'pipeline'}</p>
+                    </div>
+                    <div className="flex flex-col items-end gap-1">
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold uppercase ${
+                        t.state === 'completed' ? 'bg-green-100 text-green-700' :
+                        t.state === 'failed' ? 'bg-red-100 text-red-700' :
+                        t.state === 'running' ? 'bg-blue-100 text-blue-700 animate-pulse' :
+                        'bg-slate-100 text-slate-600'
+                      }`}>
+                        {t.state}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
           {detail.relatedAssets.length > 0 && (
             <div className="bg-white rounded-xl border border-gray-200 p-5">
               <h2 className="font-semibold text-gray-800 mb-3">相关资产</h2>

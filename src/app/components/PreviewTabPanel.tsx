@@ -16,7 +16,7 @@ type MetaForm = {
   summary: string;
 };
  
-function MarkdownTab({
+export function MarkdownTab({
   content,
   loading,
   error,
