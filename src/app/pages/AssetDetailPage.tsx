@@ -96,13 +96,51 @@ export function AssetDetailPage() {
     };
   }, [objectName]);
 
+  const [mdBootLoading, setMdBootLoading] = useState(false);
+  const [mdBootError, setMdBootError] = useState('');
+
+  useEffect(() => {
+    const mdObj = material?.metadata?.markdownObjectName;
+    const mdUrl = material?.metadata?.markdownUrl;
+    if (!material?.id || (!mdObj && !mdUrl)) return;
+
+    setMdBootLoading(true);
+    setMdBootError('');
+
+    (async () => {
+      try {
+        let url = mdUrl;
+        if (!url && mdObj) {
+          const r = await fetch(`/__proxy/upload/presign?objectName=${encodeURIComponent(mdObj)}`, { cache: 'no-store' });
+          const d = await r.json();
+          url = d?.url;
+        }
+        if (!url) throw new Error('无法获取 Markdown 访问地址');
+        let res = await fetch(url, { cache: 'no-store' });
+        if (res.status === 403 && mdObj) {
+          const r = await fetch(`/__proxy/upload/presign?objectName=${encodeURIComponent(mdObj)}`, { cache: 'no-store' });
+          const d = await r.json();
+          const retryUrl = d?.url;
+          if (retryUrl) res = await fetch(retryUrl, { cache: 'no-store' });
+        }
+        if (!res.ok) throw new Error(`读取失败: HTTP ${res.status}`);
+        setMineruMarkdown(await res.text());
+      } catch (e) {
+        setMdBootError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setMdBootLoading(false);
+      }
+    })();
+  }, [material?.id, material?.metadata?.markdownObjectName, material?.metadata?.markdownUrl]);
+
+  // 元数据可编辑表单（语言/年级/学科/国家/类型 + 摘要）
   const [metaForm, setMetaForm] = useState({
-    language:   material?.metadata?.language || '',
-    grade:      material?.metadata?.grade || '',
-    subject:    material?.metadata?.subject || '',
-    country:    material?.metadata?.country || '',
-    type:       material?.metadata?.type || '',
-    summary:    material?.metadata?.summary || '',
+    language:    material?.metadata?.language || '',
+    grade:       material?.metadata?.grade || '',
+    subject:     material?.metadata?.subject || '',
+    country:     material?.metadata?.country || '',
+    type:        material?.metadata?.type || '',
+    summary:     material?.metadata?.summary || '',
   });
 
   useEffect(() => {
