@@ -1977,6 +1977,8 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       ...(existingMaterial || {}),
       id: materialId,
       status: 'processing',
+      mineruStatus: existingMaterial?.mineruStatus || 'pending', // 显式初始化
+      aiStatus: existingMaterial?.aiStatus || 'pending',         // 显式初始化
       fileName: req.file.originalname,
       title: req.file.originalname.replace(/\.[^/.]+$/, ''),
       fileSize: req.file.size,

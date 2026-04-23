@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { PDFDocument, rgb } from 'pdf-lib';
 
 /**
  * pipeline-consistency.spec.ts - 核心处理链路一致性测试
@@ -14,8 +15,13 @@ const BASE_URL = process.env.BASE_URL || 'http://192.168.31.33:8081';
 test.describe('【7】处理链路与状态一致性', () => {
 
   test('PDF 链路一致性：上传后状态流转验证', async ({ request }) => {
-    // 1. 上传 PDF
-    const pdfContent = Buffer.from('%PDF-1.4\n1 0 obj\n<< /Title (UAT PDF) >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF');
+    // 1. 使用 pdf-lib 生成一个有效的小型单页 PDF
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([600, 400]);
+    page.drawText('UAT Consistency Test PDF Content', { x: 50, y: 350, size: 20, color: rgb(0, 0, 0) });
+    const pdfBytes = await pdfDoc.save();
+    const pdfBuffer = Buffer.from(pdfBytes);
+
     const materialId = `uat-pdf-${Date.now()}`;
     
     const uploadResp = await request.post(`${BASE_URL}/__proxy/upload/tasks`, {
@@ -23,7 +29,7 @@ test.describe('【7】处理链路与状态一致性', () => {
         file: {
           name: 'uat-consistency.pdf',
           mimeType: 'application/pdf',
-          buffer: pdfContent,
+          buffer: pdfBuffer,
         },
         materialId
       },
@@ -33,11 +39,15 @@ test.describe('【7】处理链路与状态一致性', () => {
     const { taskId } = await uploadResp.json();
     expect(taskId).toBeTruthy();
 
-    // 2. 初始状态检查
+    // 2. 初始状态检查 (增强断言：考虑 Worker 拾取速度，允许 pending 或更高状态，但不能为 undefined)
     const matResp = await request.get(`${BASE_URL}/__proxy/db/materials/${materialId}`);
     const mat = await matResp.json();
     expect(mat.status).toBe('processing');
-    expect(mat.mineruStatus).toBe('pending');
+    
+    expect(['pending', 'processing', 'completed']).toContain(mat.mineruStatus);
+    expect(['pending', 'analyzing', 'analyzed']).toContain(mat.aiStatus);
+    expect(mat.mineruStatus).not.toBeUndefined();
+    expect(mat.aiStatus).not.toBeUndefined();
 
     // 3. 轮询等待任务到达终态 (最多等待 60s)
     let finalTaskState = '';

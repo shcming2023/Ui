@@ -140,6 +140,7 @@ npx playwright show-report playwright-report
 | 【4】MinIO Nginx 代理 | `/minio/` 可达性、presigned URL 地址验证 |
 | 【5】文件上传流程 | 文件上传、presigned URL 局域网可访问性 |
 | 【6】页面导航交互 | 核心路由 SPA 切换无错误 |
+| 【7】处理链路与状态一致性 | PDF 与 Markdown 完整链路（MinerU + AI）状态收敛验证 |
 
 ---
 
