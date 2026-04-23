@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import {
   ArrowLeft, RefreshCw, FileText, Clock, AlertTriangle, CheckCircle2, Loader2, XCircle,
   ChevronDown, ChevronRight, Brain, RotateCw, Sparkles, ShieldCheck,
-  LayoutDashboard, File, Download
+  LayoutDashboard, File, Download, Database
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { MarkdownTab } from '../components/PreviewTabPanel';

@@ -76,13 +76,36 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
     });
   }
 
-  test('Task Detail page should render without crash', async ({ page }) => {
-    // 访问一个不存在的 ID 也会触发详情页组件，应检查其诊断矩阵是否因空数据崩溃
+  test('Task Detail page should render without crash', async ({ page, request }) => {
+    // 1. 先测不存在的 ID (检查空态渲染)
     await page.goto(`${BASE_URL}/cms/tasks/non-existent-id`);
     await page.waitForSelector('main', { timeout: 10000 });
-    const bodyText = await page.innerText('body');
+    let bodyText = await page.innerText('body');
     expect(bodyText).not.toContain('ReferenceError');
     expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
+    expect(bodyText).toContain('任务不存在');
+
+    // 2. 尝试测一个真实的 ID (检查数据驱动渲染)
+    const res = await request.get(`${BASE_URL}/__proxy/db/tasks`);
+    if (res.ok()) {
+      const tasks = await res.json();
+      if (Array.isArray(tasks) && tasks.length > 0) {
+        const realId = tasks[0].id;
+        console.log(`Testing real task detail: ${realId}`);
+        await page.goto(`${BASE_URL}/cms/tasks/${realId}`);
+        await page.waitForSelector('main', { timeout: 10000 });
+        
+        bodyText = await page.innerText('body');
+        expect(bodyText).not.toContain('ReferenceError');
+        expect(bodyText).not.toContain('应用程序遇到了一个意外错误');
+        
+        // W2 断言：必须看到 Tab 结构
+        expect(bodyText).toContain('概览');
+        expect(bodyText).toContain('Markdown');
+        expect(bodyText).toContain('元数据');
+        expect(bodyText).toContain('事件日志');
+      }
+    }
   });
 
 });
