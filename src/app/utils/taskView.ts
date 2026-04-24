@@ -16,6 +16,7 @@ export interface ParseTask {
   updatedAt?: string;
   completedAt?: string | null;
   retryOf?: string | null;
+  metadata?: Record<string, any>;
 }
 
 /**

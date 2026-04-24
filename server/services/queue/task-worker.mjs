@@ -12,6 +12,7 @@ import { getAllTasks, updateTask, updateMaterial } from '../tasks/task-client.mj
 import { logTaskEvent } from '../logging/task-events.mjs';
 import { processWithLocalMinerU } from '../mineru/local-adapter.mjs';
 import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
+import { parseLatestMineruProgress } from '../../lib/ops-mineru-log-parser.mjs';
 
 // 约束 3: 集中配置常量
 const POLL_INTERVAL_MS = 10000; // 10秒检查一次
@@ -97,6 +98,8 @@ export class ParseTaskWorker {
     await this.flushPendingPatches();
     const tasks = await this.taskClient.getAllTasks();
 
+    await this.observeMineruProgress(tasks);
+
     // 每轮 tick 顺便检查一次 stale-running 任务（不阻塞 pending 调度）
     await this.recoverStaleRunningTasks(tasks);
 
@@ -109,6 +112,36 @@ export class ParseTaskWorker {
       // 异步处理，不阻塞 tick 扫描下一个
       this.processTask(task);
       started += 1;
+    }
+  }
+
+  async observeMineruProgress(tasks) {
+    try {
+      const processingTasks = tasks.filter(t => t.metadata?.mineruStatus === 'processing' && t.state === 'running');
+      if (processingTasks.length !== 1) return; // Only attribute when exactly 1 processing task exists
+
+      const targetTask = processingTasks[0];
+      const logProgress = await parseLatestMineruProgress();
+      if (!logProgress) return;
+
+      const now = Date.now();
+      const observedTime = new Date(logProgress.observedAt).getTime();
+      let health = 'active';
+      if (now - observedTime > 15 * 60 * 1000) {
+        health = 'stale-critical';
+      } else if (now - observedTime > 5 * 60 * 1000) {
+        health = 'stale-warning';
+      }
+
+      await this.updateTaskWithRetry(targetTask.id, {
+        metadata: {
+          ...targetTask.metadata,
+          mineruObservedProgress: logProgress,
+          mineruProgressHealth: health
+        }
+      }, { enqueueOnFailure: true });
+    } catch (err) {
+      console.error(`[task-worker] observeMineruProgress error: ${err.message}`);
     }
   }
 

@@ -26,8 +26,8 @@ interface ParseTask {
   createdAt?: string;
   updatedAt?: string;
   completedAt?: string;
-  metadata?: Record<string, unknown>;
-  optionsSnapshot?: Record<string, unknown>;
+  metadata?: Record<string, any>;
+  optionsSnapshot?: Record<string, any>;
 }
 
 /**
@@ -755,6 +755,52 @@ export function TaskDetailPage() {
                     <dd className="text-slate-800">{task.metadata.mineruLastStatusAt ? new Date(String(task.metadata.mineruLastStatusAt)).toLocaleString() : '—'}</dd>
                   </div>
                 </dl>
+                
+                {/* MinerU 真实进度观测 */}
+                {task.metadata?.mineruObservedProgress && (
+                  <div className="mt-4 pt-4 border-t border-slate-100">
+                    <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3 flex items-center gap-2">
+                      MinerU 真实进度观测
+                    </h3>
+                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100">
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="text-xs text-slate-500">当前阶段</span>
+                        <span className="text-sm font-medium text-slate-800">
+                          {String((task.metadata.mineruObservedProgress as any).phase || '—')}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="text-xs text-slate-500">阶段进度</span>
+                        <span className="text-sm font-medium text-slate-800">
+                          {String((task.metadata.mineruObservedProgress as any).current)}/{String((task.metadata.mineruObservedProgress as any).total)} 
+                          （{String((task.metadata.mineruObservedProgress as any).percent)}%）
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center mb-2">
+                        <span className="text-xs text-slate-500">最近更新</span>
+                        <span className="text-xs text-slate-600">
+                          {(() => {
+                            const dt = new Date((task.metadata.mineruObservedProgress as any).observedAt).getTime();
+                            const diff = Math.round((Date.now() - dt) / 1000);
+                            return diff >= 0 ? `${diff} 秒前` : '刚刚';
+                          })()}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs text-slate-500">状态</span>
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${
+                          task.metadata.mineruProgressHealth === 'active' ? 'bg-green-100 text-green-700' :
+                          task.metadata.mineruProgressHealth === 'stale-warning' ? 'bg-amber-100 text-amber-700' :
+                          'bg-red-100 text-red-700'
+                        }`}>
+                          {task.metadata.mineruProgressHealth === 'active' ? '活跃' :
+                           task.metadata.mineruProgressHealth === 'stale-warning' ? '可能停滞' :
+                           task.metadata.mineruProgressHealth === 'stale-critical' ? '严重停滞' : '未知'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

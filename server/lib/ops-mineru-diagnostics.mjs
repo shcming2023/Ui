@@ -1,3 +1,5 @@
+import { parseLatestMineruProgress } from './ops-mineru-log-parser.mjs';
+
 export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
   app.get('/ops/mineru/diagnostics', async (req, res) => {
     const dbBaseUrl = getDbBaseUrl();
@@ -20,8 +22,13 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
       ok: true,
       mineru: { endpoint: localEndpoint, healthy: false, processingTasks: 0, queuedTasks: 0, maxConcurrentRequests: 1 },
       luceon: { activeTasks: [], knownMineruTaskIds: [], mineruQueuedTasks: [], mineruProcessingTasks: [] },
-      diagnosis: { status: 'unknown', kind: 'unknown', message: '', blockingMineruTaskId: null, safeToAutoRecover: false }
+      diagnosis: { status: 'unknown', kind: 'unknown', message: '', blockingMineruTaskId: null, safeToAutoRecover: false },
+      logObservation: null
     };
+
+    try {
+      result.logObservation = await parseLatestMineruProgress();
+    } catch (e) { /* ignore */ }
 
     // 1. Fetch MinerU health
     try {

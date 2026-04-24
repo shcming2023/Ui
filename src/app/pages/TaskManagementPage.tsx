@@ -374,7 +374,11 @@ export function TaskManagementPage() {
                           <div className="flex items-center gap-2">
                             <span className={`inline-flex items-center px-2 py-0.5 text-xs font-bold rounded-full ${stateBadgeClass(t.state, t.stage)}`}>
                               {t.stage === 'mineru-queued' ? 'MinerU 排队中' :
-                               t.stage === 'mineru-processing' ? 'MinerU 正在解析' :
+                               t.stage === 'mineru-processing' ? (
+                                 t.metadata?.mineruObservedProgress
+                                   ? `正在解析 · ${(t.metadata.mineruObservedProgress as any).phase} ${(t.metadata.mineruObservedProgress as any).current}/${(t.metadata.mineruObservedProgress as any).total}`
+                                   : 'MinerU 正在解析'
+                               ) :
                                zhLabelForState(t.state)}
                             </span>
                             {(() => {

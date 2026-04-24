@@ -228,42 +228,86 @@ export function OpsHealthPage() {
                 <div className="w-1 h-4 bg-orange-500 rounded-full" />
                 <h2 className="text-sm font-black text-slate-400 uppercase tracking-widest">MinerU 通畅诊断</h2>
               </div>
-              <div className={`p-6 rounded-3xl border transition-all duration-300 ${diagnostics.diagnosis.kind === 'orphan-processing-blocker' ? 'bg-orange-50 border-orange-200' : 'bg-slate-50 border-slate-100'}`}>
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">MinerU 队列状态: {diagnostics.diagnosis.status}</h3>
-                    <p className="text-xs text-slate-500 mt-1">
-                      MinerU 内部：处理中 {diagnostics.mineru.processingTasks}，排队中 {diagnostics.mineru.queuedTasks} | 
-                      Luceon 追踪：处理中 {diagnostics.luceon.mineruProcessingTasks.length}，排队中 {diagnostics.luceon.mineruQueuedTasks.length}
-                    </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-6">
+                <div className={`p-6 rounded-3xl border transition-all duration-300 ${diagnostics.diagnosis.kind === 'orphan-processing-blocker' ? 'bg-orange-50 border-orange-200' : 'bg-slate-50 border-slate-100'}`}>
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">MinerU 队列状态: {diagnostics.diagnosis.status}</h3>
+                      <p className="text-xs text-slate-500 mt-1">
+                        MinerU 内部：处理中 {diagnostics.mineru.processingTasks}，排队中 {diagnostics.mineru.queuedTasks} | 
+                        Luceon 追踪：处理中 {diagnostics.luceon.mineruProcessingTasks.length}，排队中 {diagnostics.luceon.mineruQueuedTasks.length}
+                      </p>
+                    </div>
+                    {diagnostics.diagnosis.kind === 'orphan-processing-blocker' && (
+                      <div className="bg-red-100 text-red-700 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4" /> 发现阻塞风险
+                      </div>
+                    )}
                   </div>
+
                   {diagnostics.diagnosis.kind === 'orphan-processing-blocker' && (
-                    <div className="bg-red-100 text-red-700 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4" /> 发现阻塞风险
+                    <div className="bg-white border border-red-200 rounded-xl p-4 shadow-sm">
+                      <h4 className="text-sm font-bold text-red-600 flex items-center gap-2">
+                        MinerU 当前被未知任务占用，Luceon 队列暂停推进。请先执行人工清障。
+                      </h4>
+                      <p className="text-xs text-slate-600 mt-2">
+                        诊断结果: {diagnostics.diagnosis.message}<br />
+                        占用 Task ID: {diagnostics.diagnosis.blockingMineruTaskId}
+                      </p>
+                      <div className="mt-4 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                        <p className="text-xs font-semibold text-slate-700 mb-2">恢复建议（干跑）：</p>
+                        <ol className="text-xs text-slate-600 list-decimal pl-4 space-y-1">
+                          <li>停止 mineru_api tmux session</li>
+                          <li>重新启动 conda mineru-api</li>
+                          <li>运行 node server/tests/mineru-deep-check.mjs</li>
+                          <li>确认 queued tasks 继续推进</li>
+                        </ol>
+                      </div>
                     </div>
                   )}
                 </div>
 
-                {diagnostics.diagnosis.kind === 'orphan-processing-blocker' && (
-                  <div className="bg-white border border-red-200 rounded-xl p-4 shadow-sm">
-                    <h4 className="text-sm font-bold text-red-600 flex items-center gap-2">
-                      MinerU 当前被未知任务占用，Luceon 队列暂停推进。请先执行人工清障。
-                    </h4>
-                    <p className="text-xs text-slate-600 mt-2">
-                      诊断结果: {diagnostics.diagnosis.message}<br />
-                      占用 Task ID: {diagnostics.diagnosis.blockingMineruTaskId}
-                    </p>
-                    <div className="mt-4 bg-slate-50 p-3 rounded-lg border border-slate-100">
-                      <p className="text-xs font-semibold text-slate-700 mb-2">恢复建议（干跑）：</p>
-                      <ol className="text-xs text-slate-600 list-decimal pl-4 space-y-1">
-                        <li>停止 mineru_api tmux session</li>
-                        <li>重新启动 conda mineru-api</li>
-                        <li>运行 node server/tests/mineru-deep-check.mjs</li>
-                        <li>确认 queued tasks 继续推进</li>
-                      </ol>
-                    </div>
+                <div className="p-6 rounded-3xl border bg-slate-50 border-slate-100">
+                  <div className="flex items-center justify-between mb-4">
+                    <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                      <Activity className="w-4 h-4" />
+                      MinerU 日志观测状态
+                    </h3>
+                    {diagnostics.logObservation ? (
+                      <div className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[10px] font-bold uppercase">
+                        Active
+                      </div>
+                    ) : (
+                      <div className="bg-slate-200 text-slate-600 px-2 py-0.5 rounded text-[10px] font-bold uppercase">
+                        No Data
+                      </div>
+                    )}
                   </div>
-                )}
+                  {diagnostics.logObservation ? (
+                    <div>
+                      <p className="text-xs text-slate-500 mb-2">最近真实进度</p>
+                      <div className="bg-white rounded-xl p-3 border border-slate-200">
+                        <p className="text-sm font-bold text-slate-800">
+                          {diagnostics.logObservation.phase} {diagnostics.logObservation.current}/{diagnostics.logObservation.total}
+                        </p>
+                        <div className="flex items-center gap-2 mt-2">
+                          <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                            <div className="h-full bg-blue-500 rounded-full" style={{ width: `${diagnostics.logObservation.percent}%` }} />
+                          </div>
+                          <span className="text-xs text-slate-500">{diagnostics.logObservation.percent}%</span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-500 mt-3">
+                        是否可唯一归因：{diagnostics.luceon.mineruProcessingTasks.length === 1 ? '是' : '否 (无法唯一归因)'}
+                      </p>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500">
+                      未在本机日志文件中观测到最新的阶段性进度输出。
+                    </p>
+                  )}
+                </div>
               </div>
             </div>
           )}
