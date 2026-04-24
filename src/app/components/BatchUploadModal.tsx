@@ -236,36 +236,11 @@ export function BatchProcessingController() {
         materialId = newId;
         updateItem(item.id, { materialId: newId });
 
-        dispatch({
-          type: 'ADD_MATERIAL',
-          payload: {
-            id: newId,
-            title: f.name.replace(/\.[^.]+$/, ''),
-            type: f.name.split('.').pop()?.toUpperCase() ?? 'FILE',
-            size: `${(f.size / 1024 / 1024).toFixed(1)} MB`,
-            sizeBytes: f.size,
-            uploadTime: '上传中...',
-            uploadTimestamp: Date.now(),
-            status: 'processing',
-            mineruStatus: 'pending',
-            aiStatus: 'pending',
-            tags: [],
-            metadata: {
-              relativePath: item.path,
-              processingStage: 'upload',
-              processingMsg: '正在上传文件...',
-              processingProgress: '10',
-              processingUpdatedAt: new Date().toISOString(),
-            },
-            uploader: '当前用户',
-          },
-        });
-
         const formData = new FormData();
         formData.append('file', f);
         formData.append('materialId', String(newId));
 
-        const uploadRes = await fetchWithTimeout('/__proxy/upload/upload', {
+        const uploadRes = await fetchWithTimeout('/__proxy/upload/tasks', {
           method: 'POST',
           body: formData,
           timeoutMs: 120_000,
@@ -282,104 +257,52 @@ export function BatchProcessingController() {
           throw new Error('上传成功但未获得 objectName（未写入 MinIO）。后端队列只能处理 MinIO 文件，请检查存储后端配置。');
         }
 
+        const fileName = String(uploadResult?.fileName || f.name || '').trim() || f.name;
+        const title = fileName.replace(/\.[^.]+$/, '');
         dispatch({
-          type: 'UPDATE_MATERIAL',
+          type: 'ADD_MATERIAL',
           payload: {
             id: newId,
-            updates: {
-              status: 'processing',
-              uploadTime: '刚刚',
-              metadata: {
-                relativePath: item.path,
-                fileUrl: uploadResult.url,
-                objectName,
-                fileName: uploadResult.fileName,
-                provider: uploadResult.provider,
-                mimeType: uploadResult.mimeType,
-                ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
-                ...(uploadResult.format ? { format: uploadResult.format } : {}),
-                processingStage: 'db_create',
-                processingMsg: '正在创建数据库记录...',
-                processingProgress: '40',
-                processingUpdatedAt: new Date().toISOString(),
-              },
+            title,
+            type: (fileName.split('.').pop() || 'FILE').toUpperCase(),
+            size: `${(f.size / 1024 / 1024).toFixed(1)} MB`,
+            sizeBytes: f.size,
+            uploadTime: '刚刚',
+            uploadTimestamp: Date.now(),
+            status: 'processing',
+            mineruStatus: 'pending',
+            aiStatus: 'pending',
+            tags: [],
+            metadata: {
+              relativePath: item.path,
+              objectName,
+              fileName,
+              provider: uploadResult?.provider,
+              mimeType: uploadResult?.mimeType,
+              processingStage: 'mineru',
+              processingMsg: '等待后端队列处理',
+              processingProgress: '0',
+              processingUpdatedAt: new Date().toISOString(),
             },
+            uploader: '当前用户',
           },
         });
 
-        updateItem(item.id, { progress: 50, message: '创建数据库记录...' });
-
-        const materialData = {
-          id: newId,
-          title: f.name.replace(/\.[^.]+$/, ''),
-          type: f.name.split('.').pop()?.toUpperCase() ?? 'FILE',
-          size: `${(f.size / 1024 / 1024).toFixed(1)} MB`,
-          sizeBytes: f.size,
-          uploadTime: '刚刚',
-          uploadTimestamp: Date.now(),
-          uploader: '当前用户',
-          status: 'processing',
-          mineruStatus: 'pending',
-          aiStatus: 'pending',
-          tags: [],
-          metadata: {
-            relativePath: item.path,
-            fileUrl: uploadResult.url,
-            objectName,
-            fileName: uploadResult.fileName,
-            provider: uploadResult.provider,
-            mimeType: uploadResult.mimeType,
-            ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
-            ...(uploadResult.format ? { format: uploadResult.format } : {}),
-            processingStage: '',
-            processingMsg: '上传成功，请在列表中点击"开始解析"',
-            processingProgress: '0',
-            processingUpdatedAt: new Date().toISOString(),
-          },
-        };
-        if (materialData.metadata?.provider === 'minio' && materialData.metadata.objectName) {
-          delete (materialData.metadata as unknown as { fileUrl?: string }).fileUrl;
-        }
-
-        const dbRes = await fetchWithTimeout('/__proxy/db/materials', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(materialData),
-          timeoutMs: 10_000,
+        const taskId = String(uploadResult?.taskId || '').trim();
+        updateItem(item.id, {
+          status: 'completed',
+          progress: 100,
+          message: taskId ? `上传成功（${taskId}）` : '上传成功',
         });
-
-        if (!dbRes.ok) {
-          const errText = await dbRes.text();
-          throw new Error(`创建数据库记录失败: HTTP ${dbRes.status} - ${errText}`);
-        }
-
-        await dbRes.json().catch(() => null);
-
-        updateItem(item.id, { status: 'completed', progress: 100, message: '上传成功' });
         batchRemoveFile(item.id);
-        toast.success('上传成功，请在列表中点击"开始解析"');
+        toast.success('上传成功');
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
         const msg = raw.includes('请求超时') || raw.includes('timed out') || raw.includes('Timeout')
           ? `上传/提交超时：${raw}`
           : `上传/提交失败：${raw}`;
         updateItem(item.id, { status: 'error', message: msg });
-        if (materialId) {
-          dispatch({
-            type: 'UPDATE_MATERIAL',
-            payload: {
-              id: materialId,
-              updates: {
-                status: 'failed',
-                uploadTime: '处理失败',
-                metadata: {
-                  processingMsg: msg,
-                  processingUpdatedAt: new Date().toISOString(),
-                },
-              },
-            },
-          });
-        }
+        void materialId;
       }
     };
 

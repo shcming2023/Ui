@@ -99,6 +99,14 @@ function sanitizeMaterialForPersistence(material: Material): Material {
   };
 }
 
+function shouldPersistMaterial(material: Material) {
+  const meta = material.metadata || {};
+  if ((meta as { localDraft?: unknown }).localDraft === true) return false;
+  const objectName = typeof meta.objectName === 'string' ? meta.objectName.trim() : '';
+  if (material.status === 'processing' && !objectName) return false;
+  return true;
+}
+
 function sanitizeAssetDetailForPersistence(detail: AssetDetail): AssetDetail {
   const metadata = { ...detail.metadata };
   if (metadata.provider === 'minio' && typeof metadata.objectName === 'string' && metadata.objectName) {
@@ -506,7 +514,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // ── 持久化：localStorage（同步）+ db-server（异步）────────────
 
   useEffect(() => {
-    const materialsForPersistence = state.materials.map(sanitizeMaterialForPersistence);
+    const materialsForPersistence = state.materials.filter(shouldPersistMaterial).map(sanitizeMaterialForPersistence);
     saveToStorage(LS.MATERIALS, materialsForPersistence);
 
     const currentIds = new Set(state.materials.map((m) => m.id));
@@ -514,6 +522,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (hydratedRef.current) {
       // 差量 upsert：仅对内容指纹变化的记录执行 POST（#7）
       for (const m of state.materials) {
+        if (!shouldPersistMaterial(m)) continue;
         const sanitized = sanitizeMaterialForPersistence(m);
         const fingerprint = JSON.stringify(sanitized);
         if (materialFingerprintsRef.current.get(m.id) !== fingerprint) {

@@ -27,7 +27,6 @@ import type { TabFilter, SortOption, ViewMode } from '../../store/types';
 import { sortMaterials } from '../../utils/sort';
 import { usePagination, getPageNumbers } from '../../utils/pagination';
 import { checkLocalMinerUHealth } from '../../utils/mineruLocalApi';
-import { generateNumericIdFromUuid } from '../../utils/id';
 
 // ── 工具函数 ──────────────────────────────────────────────
 const getMaterialTags = (m: any) =>
@@ -99,9 +98,6 @@ function formatBytes(bytes: number) {
 export function SourceMaterialsPage() {
   const { state, dispatch } = useAppStore();
   const navigate = useNavigate();
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const folderInputRef = useRef<HTMLInputElement>(null);
-  const uploadHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [tab, setTab] = useState<TabFilter>('all');
   const [search, setSearch] = useState('');
@@ -235,15 +231,6 @@ export function SourceMaterialsPage() {
     });
   };
 
-  const validateFile = (file: File): { valid: boolean; error?: string } => {
-    const { mineruConfig } = state;
-    const MAX_SIZE = (mineruConfig.maxFileSize || 0) > 0 ? mineruConfig.maxFileSize : 200 * 1024 * 1024;
-    if (file.size > MAX_SIZE) {
-      return { valid: false, error: `文件 "${file.name}" 超过上传限制 (最大 ${Math.round(MAX_SIZE / (1024 * 1024))}MB)` };
-    }
-    return { valid: true };
-  };
-
   const showStatusColumn = tab !== 'completed';
 
   const getStageSummary = (m: typeof state.materials[number]) => {
@@ -262,185 +249,6 @@ export function SourceMaterialsPage() {
     if (m.mineruStatus === 'pending') return { label: '待解析', detail: msg };
     if (m.aiStatus === 'pending') return { label: '待分析', detail: msg };
     return { label: '处理中', detail: msg };
-  };
-
-  const [batchUploading, setBatchUploading] = useState(false);
-
-  const handleBatchFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    if (files.length === 0) return;
-    const invalidFiles = files.filter((f) => !validateFile(f).valid);
-    if (invalidFiles.length > 0) {
-      toast.error(`发现 ${invalidFiles.length} 个不符合规范的文件被过滤`, { icon: <AlertTriangle size={16} /> });
-    }
-    const validFiles = files.filter((f) => validateFile(f).valid);
-    e.target.value = '';
-    if (validFiles.length === 0) return;
-
-    setBatchUploading(true);
-    if (uploadHideTimerRef.current) {
-      clearTimeout(uploadHideTimerRef.current);
-      uploadHideTimerRef.current = null;
-    }
-    setUploadProgress({ done: 0, total: validFiles.length, failed: 0 });
-
-    const items = validFiles.map((file) => {
-      const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-      const materialId = generateNumericIdFromUuid();
-      const jobId = `job-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      return { file, filePath, materialId, jobId };
-    });
-
-    for (const it of items) {
-      dispatch({
-        type: 'ADD_MATERIAL',
-        payload: {
-          id: it.materialId,
-          title: it.file.name.replace(/\.[^.]+$/, ''),
-          type: it.file.name.split('.').pop()?.toUpperCase() ?? 'FILE',
-          size: `${(it.file.size / 1024 / 1024).toFixed(1)} MB`,
-          sizeBytes: it.file.size,
-          uploadTime: '上传中...',
-          uploadTimestamp: Date.now(),
-          status: 'processing',
-          mineruStatus: 'pending',
-          aiStatus: 'pending',
-          tags: [],
-          metadata: {
-            relativePath: it.filePath,
-            processingStage: 'upload',
-            processingMsg: '待上传',
-            processingProgress: '0',
-            processingUpdatedAt: new Date().toISOString(),
-          },
-          uploader: '当前用户',
-        },
-      });
-    }
-
-    const uploadWithProgress = (file: File, materialId: number, onProgress: (pct: number) => void) => {
-      return new Promise<any>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open('POST', '/__proxy/upload/tasks');
-        xhr.responseType = 'json';
-        xhr.upload.onprogress = (evt) => {
-          if (!evt.lengthComputable) return;
-          const pct = Math.max(0, Math.min(100, Math.round((evt.loaded / Math.max(1, evt.total)) * 100)));
-          onProgress(pct);
-        };
-        xhr.onload = () => {
-          if (xhr.status >= 200 && xhr.status < 300) resolve(xhr.response);
-          else reject(new Error((xhr.response && xhr.response.error) || xhr.responseText || `HTTP ${xhr.status}`));
-        };
-        xhr.onerror = () => reject(new Error('网络错误'));
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('materialId', String(materialId));
-        xhr.send(formData);
-      });
-    };
-
-    const uploadOne = async (it: { file: File; filePath: string; materialId: number; jobId: string }) => {
-      let lastEmitAt = 0;
-      const emit = async (pct: number) => {
-        const now = Date.now();
-        if (now - lastEmitAt < 400 && pct !== 100) return;
-        lastEmitAt = now;
-        dispatch({
-          type: 'UPDATE_MATERIAL',
-          payload: {
-            id: it.materialId,
-            updates: {
-              metadata: {
-                relativePath: it.filePath,
-                processingStage: 'upload',
-                processingMsg: `上传中 ${pct}%`,
-                processingProgress: String(pct),
-                processingUpdatedAt: new Date().toISOString(),
-              },
-            },
-          },
-        });
-      };
-
-      try {
-        await emit(0);
-        const uploadResult = await uploadWithProgress(it.file, it.materialId, (pct) => { void emit(pct); });
-        const objectName = String(uploadResult?.objectName || '').trim();
-        if (!objectName) throw new Error('上传成功但未获得 objectName（未写入 MinIO）');
-
-        dispatch({
-          type: 'UPDATE_MATERIAL',
-          payload: {
-            id: it.materialId,
-            updates: {
-              uploadTime: '刚刚',
-              metadata: {
-                relativePath: it.filePath,
-                fileUrl: uploadResult.url,
-                objectName,
-                fileName: uploadResult.fileName,
-                provider: uploadResult.provider,
-                mimeType: uploadResult.mimeType,
-                ...(uploadResult.pages != null ? { pages: String(uploadResult.pages) } : {}),
-                ...(uploadResult.format ? { format: uploadResult.format } : {}),
-                processingStage: 'mineru',
-                processingMsg: '等待后端队列处理',
-                processingProgress: '0',
-                processingUpdatedAt: new Date().toISOString(),
-              },
-            },
-          },
-        });
-
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          console.warn(`[frontend] 上传中途出错: ${msg}`);
-          dispatch({
-            type: 'UPDATE_MATERIAL',
-            payload: {
-              id: it.materialId,
-              updates: {
-                status: 'failed',
-                mineruStatus: 'failed',
-                aiStatus: 'failed',
-                uploadTime: '上传失败',
-                metadata: {
-                  processingStage: '',
-                  processingMsg: `上传失败：${msg}`,
-                  processingUpdatedAt: new Date().toISOString(),
-                },
-              },
-            },
-          });
-          setUploadProgress((prev) => (prev ? { ...prev, failed: prev.failed + 1 } : prev));
-        } finally {
-        setUploadProgress((prev) => {
-          if (!prev) return prev;
-          const next = { ...prev, done: prev.done + 1 };
-          if (next.done >= next.total) {
-            uploadHideTimerRef.current = setTimeout(() => {
-              setUploadProgress(null);
-              uploadHideTimerRef.current = null;
-            }, 2000);
-          }
-          return next;
-        });
-      }
-    };
-
-    const concurrency = 3;
-    let idx = 0;
-    const runners = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
-      while (idx < items.length) {
-        const current = items[idx];
-        idx += 1;
-        await uploadOne(current);
-      }
-    });
-    await Promise.all(runners);
-
-    setBatchUploading(false);
   };
 
   const handleResetConfig = () => {

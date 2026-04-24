@@ -63,4 +63,41 @@ test.describe('【P0】上传校验原子化', () => {
     const task = await taskResp.json();
     expect(task.optionsSnapshot?.material?.fileName).toBe(fileName);
   });
+
+  test('上传请求被 abort 不得留下 processing 脏素材', async ({ page, request }) => {
+    const stamp = Date.now();
+    const baseName = `uat-abort-${stamp}`;
+    const fileName = `${baseName}.pdf`;
+
+    const beforeResp = await request.get(`${BASE_URL}/__proxy/db/materials`);
+    expect(beforeResp.status()).toBe(200);
+    const beforeList = await beforeResp.json();
+    void beforeList;
+
+    await page.route('**/__proxy/upload/tasks', async (route) => {
+      await route.abort();
+    });
+
+    await page.goto(`${BASE_URL}/cms/workspace`);
+    const input = page.locator('input[type="file"]').first();
+    await input.setInputFiles({
+      name: fileName,
+      mimeType: 'application/pdf',
+      buffer: Buffer.from('%PDF-1.4\n% abort-test\n', 'utf-8'),
+    });
+
+    await page.waitForTimeout(800);
+
+    const afterResp = await request.get(`${BASE_URL}/__proxy/db/materials`);
+    expect(afterResp.status()).toBe(200);
+    const afterList = await afterResp.json();
+    if (Array.isArray(afterList)) {
+      const exists = afterList.some((m) =>
+        String((m as any)?.title || '').trim() === baseName
+        || String((m as any)?.fileName || '').trim() === fileName
+        || String((m as any)?.metadata?.fileName || '').trim() === fileName
+      );
+      expect(exists).toBe(false);
+    }
+  });
 });
