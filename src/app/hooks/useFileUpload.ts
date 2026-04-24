@@ -61,9 +61,10 @@ export function useFileUpload() {
   const uploading = bp.running && !bp.paused;
   const progress = useMemo<UploadProgress | null>(() => {
     if (bp.items.length === 0) return null;
-    const done = bp.items.filter((i) => ['completed', 'error', 'skipped'].includes(i.status)).length;
-    const failed = bp.items.filter((i) => i.status === 'error').length;
-    const succeeded = bp.items.filter((i) => i.status === 'completed').length;
+    const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
+    const done = bp.items.filter((i) => terminal.has(i.status)).length;
+    const failed = bp.items.filter((i) => i.status === 'failed' || i.status === 'canceled' || i.status === 'error').length;
+    const succeeded = bp.items.filter((i) => i.status === 'completed' || i.status === 'review-pending').length;
     return { done, total: bp.items.length, failed, succeeded };
   }, [bp.items]);
  

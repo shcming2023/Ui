@@ -133,8 +133,8 @@ npx playwright show-report playwright-report
 ### 上传队列可靠性回归（本地样本目录）
 
 ```bash
-cd /Users/concm/prod_workspace/Luceon2026/uat
-TEST_PDF_DIR=/Users/concm/prod_workspace/Luceon2026/testpdf \
+cd uat
+TEST_PDF_DIR="$(pwd)/../testpdf" \
 BASE_URL=http://127.0.0.1:8081 \
 npx playwright test tests/upload-queue-reliability.spec.ts
 ```

@@ -15,12 +15,20 @@ export type AiStatus = 'analyzed' | 'analyzing' | 'pending' | 'failed';
 export type MinerUStatus = 'pending' | 'processing' | 'completed' | 'failed';
 
 /** 批处理队列条目状态 */
-export type BatchItemStatus = 'pending' | 'uploading' | 'uploaded' | 'mineru' | 'ai' | 'completed' | 'error' | 'skipped';
-
-
-
-
-
+export type BatchItemStatus =
+  | 'pending'
+  | 'uploading'
+  | 'task-created'
+  | 'tracking'
+  | 'review-pending'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+  | 'error'
+  | 'skipped'
+  | 'uploaded'
+  | 'mineru'
+  | 'ai';
 /** 排序选项 */
 export type SortOption = 'newest' | 'oldest' | 'name' | 'size';
 
@@ -110,6 +118,10 @@ export interface BatchQueueItem {
   progress: number;
   message?: string;
   materialId?: number;
+  taskId?: string;
+  objectName?: string;
+  taskState?: string;
+  taskStage?: string;
   mineruStartedAt?: number;
   createdAt: number;
   updatedAt: number;

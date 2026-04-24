@@ -5,6 +5,7 @@ import {
   Pause,
   SkipForward,
   RotateCcw,
+  ExternalLink,
   AlertCircle,
   CheckCircle2,
   Loader,
@@ -58,10 +59,6 @@ function formatAgo(ts: number) {
   return `${hr}h 前`;
 }
 
-// ─── 文件名编码修复函数 ────────────────────────────────────────────
-/**
- * 修复文件名编码（处理 UTF-8 字节被当作 Latin-1 解析的情况）
- */
 function fixFilenameEncoding(filename: string | undefined): string {
   if (!filename) return '';
 
@@ -81,8 +78,7 @@ function fixFilenameEncoding(filename: string | undefined): string {
     if (/[\u4E00-\u9FFF]/.test(utf8String)) {
       return utf8String;
     }
-  } catch (error) {
-    console.warn('Failed to fix filename encoding:', error);
+  } catch {
   }
 
   return filename;
@@ -117,6 +113,10 @@ function getStallThresholdMs(
   mineruLocalTimeoutSec: number,
 ) {
   if (status === 'uploading') return 120_000;
+  if (status === 'task-created' || status === 'tracking') {
+    const t = mineruEngine === 'local' ? (mineruLocalTimeoutSec || 300) : (mineruTimeoutSec || 300);
+    return Math.max(120_000, t * 1000 + 60_000);
+  }
   if (status === 'ai') return Math.max(60_000, (aiTimeoutSec || 300) * 1000 + 30_000);
   if (status === 'mineru') {
     const t = mineruEngine === 'local' ? (mineruLocalTimeoutSec || 300) : (mineruTimeoutSec || 300);
@@ -159,7 +159,7 @@ export function BatchProcessingController() {
   );
 
   const activeItem = useMemo(
-    () => items.find((i) => i.status === 'uploading'),
+    () => items.find((i) => i.status === 'uploading' || i.status === 'task-created' || i.status === 'tracking'),
     [items],
   );
 
@@ -195,19 +195,106 @@ export function BatchProcessingController() {
   }, [activeItem, dispatch, state.aiConfig.timeout, state.batchProcessing.paused, state.batchProcessing.running, state.mineruConfig.timeout]);
 
   useEffect(() => {
+    if (!running || paused) return;
+    const timer = window.setInterval(() => {
+      const trackables = items.filter((i) =>
+        (i.status === 'task-created' || i.status === 'tracking') && typeof i.taskId === 'string' && i.taskId.trim(),
+      );
+      if (trackables.length === 0) return;
+
+      for (const it of trackables) {
+        const taskId = String(it.taskId || '').trim();
+        if (!taskId) continue;
+        fetchWithTimeout(`/__proxy/db/tasks/${encodeURIComponent(taskId)}`, { timeoutMs: 8000 })
+          .then((r) => (r.ok ? r.json().catch(() => null) : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((task) => {
+            const stateKey = String(task?.state || '').trim();
+            const stageKey = String(task?.stage || '').trim();
+            const progress = Number(task?.progress);
+            const message = String(task?.message || '').trim();
+            const errorMessage = String(task?.errorMessage || '').trim();
+            const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled']);
+            if (terminal.has(stateKey)) {
+              const status =
+                stateKey === 'review-pending'
+                  ? 'review-pending'
+                  : stateKey === 'completed'
+                    ? 'completed'
+                    : stateKey === 'canceled'
+                      ? 'canceled'
+                      : 'failed';
+              dispatch({
+                type: 'BATCH_UPDATE_ITEM',
+                payload: {
+                  id: it.id,
+                  updates: {
+                    status,
+                    progress: 100,
+                    taskState: stateKey,
+                    taskStage: stageKey,
+                    message: errorMessage
+                      ? `处理失败：${errorMessage}`
+                      : message
+                        ? message
+                        : status === 'review-pending'
+                          ? '待人工复核'
+                          : status === 'completed'
+                            ? '处理完成'
+                            : '处理失败',
+                  },
+                },
+              });
+              return;
+            }
+
+            dispatch({
+              type: 'BATCH_UPDATE_ITEM',
+              payload: {
+                id: it.id,
+                updates: {
+                  status: 'tracking',
+                  progress: Number.isFinite(progress) ? Math.max(0, Math.min(99, progress)) : it.progress,
+                  taskState: stateKey || it.taskState,
+                  taskStage: stageKey || it.taskStage,
+                  message: message || (stageKey ? `处理中：${stageKey}` : '处理中'),
+                },
+              },
+            });
+          })
+          .catch(() => {});
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [dispatch, items, paused, running]);
+
+  useEffect(() => {
     if (!running || paused || working) return;
 
     if (!nextPending) {
+      const stillActive = items.some((i) => i.status === 'uploading' || i.status === 'task-created' || i.status === 'tracking');
+      if (stillActive) return;
+
       if (wasRunningRef.current) {
-        const total = items.length;
-        const succeeded = items.filter((i) => i.status === 'completed').length;
-        const failed = items.filter((i) => i.status === 'error').length;
+        const created = items.filter((i) => typeof i.taskId === 'string' && i.taskId.trim()).length;
+        const done = items.filter((i) => i.status === 'completed').length;
+        const reviewPending = items.filter((i) => i.status === 'review-pending').length;
+        const failed = items.filter((i) => i.status === 'failed' || i.status === 'canceled').length;
+        const uploadFailed = items.filter((i) => i.status === 'error').length;
         const skipped = items.filter((i) => i.status === 'skipped').length;
-        if (failed > 0) {
-          toast.warning(`批量处理已结束：成功 ${succeeded}，失败 ${failed}${skipped > 0 ? `，跳过 ${skipped}` : ''}`);
-        } else {
-          toast.success(`批量处理队列已完成：成功 ${succeeded}${skipped > 0 ? `，跳过 ${skipped}` : ''}`);
-        }
+        toast(
+          '批量队列已结束',
+          {
+            description: [
+              `已创建任务 ${created}`,
+              `处理完成 ${done}`,
+              `待复核 ${reviewPending}`,
+              `处理失败 ${failed}`,
+              `上传失败 ${uploadFailed}`,
+              skipped > 0 ? `跳过 ${skipped}` : null,
+            ].filter(Boolean).join('，'),
+            duration: 8000,
+          },
+        );
       }
       wasRunningRef.current = false;
       dispatch({ type: 'BATCH_SET_RUNNING', payload: { running: false } });
@@ -240,7 +327,7 @@ export function BatchProcessingController() {
         const uploadHealth = await fetchWithTimeout('/__proxy/upload/health', { timeoutMs: 5000 }).catch(() => null);
         if (!uploadHealth?.ok) throw new Error('上传服务不可用（/__proxy/upload/health）');
 
-        updateItem(item.id, { status: 'uploading', progress: 10, message: '正在上传文件...' });
+        updateItem(item.id, { status: 'uploading', progress: 10, message: '正在提交上传...' });
 
         const newId = generateNumericIdFromUuid();
         materialId = newId;
@@ -301,12 +388,14 @@ export function BatchProcessingController() {
         });
 
         updateItem(item.id, {
-          status: 'completed',
-          progress: 100,
-          message: `上传成功（${taskId}）`,
+          status: 'task-created',
+          progress: 25,
+          taskId,
+          objectName,
+          message: `任务已创建（${taskId}）`,
         });
         batchRemoveFile(item.id);
-        toast.success('上传成功');
+        toast.success('任务已创建');
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
         const lowered = raw.toLowerCase();
@@ -358,9 +447,12 @@ export function BatchProcessingController() {
                 } else {
                   dispatch({ type: 'ADD_MATERIAL', payload });
                 }
+                const taskId = String(related?.id || '').trim();
                 updateItem(item.id, {
-                  status: 'completed',
-                  progress: 100,
+                  status: 'task-created',
+                  progress: 25,
+                  taskId,
+                  objectName,
                   message: `上传已创建任务（响应中断后自动对账）`,
                 });
                 batchRemoveFile(item.id);
@@ -463,6 +555,14 @@ export function BatchUploadModal() {
   };
 
   const handleRetry = (id: string) => {
+    const item = items.find((i) => i.id === id);
+    if (!item) return;
+    const taskId = String(item.taskId || '').trim();
+    if (taskId) {
+      window.open(`/cms/tasks/${encodeURIComponent(taskId)}`, '_blank');
+      toast('已打开任务详情页', { description: '如需重跑解析/AI，请在任务详情页执行对应操作。' });
+      return;
+    }
     dispatch({ type: 'BATCH_UPDATE_ITEM', payload: { id, updates: { status: 'pending', progress: 0, message: '等待重试...', mineruStartedAt: undefined } } });
     dispatch({ type: 'BATCH_SET_RUNNING', payload: { running: true } });
     dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: false } });
@@ -542,14 +642,20 @@ export function BatchUploadModal() {
             </div>
           ) : (
             items.map((item) => {
-              const isMinerURunning = item.status === 'mineru';
+              const isRunningPhase =
+                item.status === 'uploading'
+                || item.status === 'task-created'
+                || item.status === 'tracking'
+                || item.status === 'mineru'
+                || item.status === 'ai';
               const mineruLimitSec =
                 state.mineruConfig.engine === 'local'
                   ? Number(state.mineruConfig.localTimeout || 0)
                   : Number(state.mineruConfig.timeout || 0);
-              const elapsedMs = isMinerURunning
+              const elapsedMs = item.status === 'mineru'
                 ? Math.max(0, now - (item.mineruStartedAt || item.updatedAt))
                 : 0;
+              const taskId = String(item.taskId || '').trim();
 
               return (
                 <div key={item.id} className="bg-white rounded-lg border border-gray-200 p-3 shadow-sm flex flex-col gap-2">
@@ -570,8 +676,13 @@ export function BatchUploadModal() {
                       </button>
                     )}
                     {(item.status === 'error' || item.status === 'skipped') && (
-                      <button onClick={() => handleRetry(item.id)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="重试">
+                      <button onClick={() => handleRetry(item.id)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="重试上传">
                         <RotateCcw size={14} />
+                      </button>
+                    )}
+                    {(item.status === 'failed' || item.status === 'canceled' || item.status === 'review-pending') && taskId && (
+                      <button onClick={() => handleRetry(item.id)} className="p-1.5 text-blue-600 hover:bg-blue-50 rounded" title="打开任务">
+                        <ExternalLink size={14} />
                       </button>
                     )}
                     {(item.status === 'pending' || item.status === 'error' || item.status === 'skipped') && (
@@ -582,14 +693,28 @@ export function BatchUploadModal() {
                   </div>
                 </div>
 
-                {isMinerURunning ? (
+                {isRunningPhase ? (
                   <div className="flex items-center justify-between gap-3">
                     <div className="flex items-center gap-2 text-xs text-gray-600">
                       <Loader size={14} className="animate-spin" />
-                      <span>正在执行深度解析...</span>
+                      <span>
+                        {item.status === 'uploading'
+                          ? '正在提交上传...'
+                          : item.status === 'task-created'
+                            ? '任务已创建，等待处理...'
+                            : item.status === 'tracking'
+                              ? `处理中：${String(item.taskStage || item.taskState || '').trim() || 'processing'}`
+                              : item.status === 'ai'
+                                ? 'AI 分析中...'
+                                : 'MinerU 解析中...'}
+                      </span>
                     </div>
                     <div className="text-xs text-gray-500">
-                      已耗时: {formatClock(elapsedMs)}{mineruLimitSec > 0 ? ` / 限额: ${formatClock(mineruLimitSec * 1000)}` : ''}
+                      {item.status === 'mineru'
+                        ? `已耗时: ${formatClock(elapsedMs)}${mineruLimitSec > 0 ? ` / 限额: ${formatClock(mineruLimitSec * 1000)}` : ''}`
+                        : taskId
+                          ? `任务：${taskId}`
+                          : ''}
                     </div>
                   </div>
                 ) : (
@@ -597,10 +722,12 @@ export function BatchUploadModal() {
                     <div className="flex-1 h-2 bg-gray-100 rounded-full overflow-hidden">
                       <div
                         className={`h-full transition-all duration-300 ${
-                          item.status === 'error'
+                          item.status === 'error' || item.status === 'failed' || item.status === 'canceled'
                             ? 'bg-red-500'
                             : item.status === 'completed'
                               ? 'bg-green-500'
+                              : item.status === 'review-pending'
+                                ? 'bg-yellow-500'
                               : item.status === 'skipped'
                                 ? 'bg-gray-400'
                                 : 'bg-blue-500'
@@ -609,9 +736,13 @@ export function BatchUploadModal() {
                       />
                     </div>
                     <div className="w-24 text-right">
-                      {item.status === 'error' ? (
+                      {item.status === 'error' || item.status === 'failed' || item.status === 'canceled' ? (
                         <span className="flex items-center justify-end gap-1 text-xs text-red-600">
                           <AlertCircle size={12} /> 出错
+                        </span>
+                      ) : item.status === 'review-pending' ? (
+                        <span className="flex items-center justify-end gap-1 text-xs text-yellow-700">
+                          <AlertCircle size={12} /> 待复核
                         </span>
                       ) : item.status === 'completed' ? (
                         <span className="flex items-center justify-end gap-1 text-xs text-green-600">
@@ -644,10 +775,17 @@ export function BatchProgressFab() {
   const bp = state.batchProcessing;
 
   // 前端队列统计
-  const activeCount = bp.items.filter((i) => !['completed', 'skipped', 'error'].includes(i.status)).length;
-  const errorCount = bp.items.filter((i) => i.status === 'error').length;
+  const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
+  const activeCount = bp.items.filter((i) => !terminal.has(i.status)).length;
+  const errorCount = bp.items.filter((i) => i.status === 'error' || i.status === 'failed' || i.status === 'canceled').length;
   const totalCount = bp.items.length;
-  const activeItem = bp.items.find((i) => i.status === 'uploading' || i.status === 'mineru' || i.status === 'ai');
+  const activeItem = bp.items.find((i) =>
+    i.status === 'uploading'
+    || i.status === 'task-created'
+    || i.status === 'tracking'
+    || i.status === 'mineru'
+    || i.status === 'ai',
+  );
   const isStale = activeItem
     ? Date.now() - activeItem.updatedAt >
       getStallThresholdMs(

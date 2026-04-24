@@ -55,7 +55,7 @@ async function getDbSnapshot(request: APIRequestContext) {
 test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
   test('多轮提交 + abort + 重试：前端成功数与后端新增任务数一致', async ({ page, request }, testInfo) => {
     const runId = `upload-queue-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    testInfo.setTimeout(10 * 60 * 1000);
+    testInfo.setTimeout(20 * 60 * 1000);
 
     await resetBatchProcessingPersistence(request);
 
@@ -106,38 +106,50 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
     }
     await expect(modalTitle).toBeVisible({ timeout: 10000 });
 
-    const errorBadge = page.locator('text=失败').first();
-    await expect(errorBadge).toBeVisible({ timeout: 10000 });
+    const retryBtn = page.locator('button[title="重试上传"]').first();
+    await expect(retryBtn).toBeVisible({ timeout: 10000 });
 
-    const waitForQueueIdle = async () => {
+    const waitForQueueStable = async () => {
       await page.waitForFunction(() => {
         const raw = localStorage.getItem('app_batch_processing');
         if (!raw) return false;
         const data = JSON.parse(raw);
         const items = Array.isArray(data?.items) ? data.items : [];
-        const active = items.filter((it: any) => !['completed', 'error', 'skipped'].includes(String(it?.status)));
+        const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
+        const active = items.filter((it: any) => !terminal.has(String(it?.status)));
         return active.length === 0;
-      }, { timeout: 180000 });
+      }, { timeout: 15 * 60 * 1000 });
     };
 
-    await waitForQueueIdle();
+    await waitForQueueStable();
 
-    const retryButtons = page.locator('button[title="重试"]');
-    const retryCount = await retryButtons.count();
+    const retryButtons = page.locator('button[title="重试上传"]');
+    let retryCount = await retryButtons.count();
     expect(retryCount).toBeGreaterThanOrEqual(1);
-    for (let i = 0; i < retryCount; i += 1) {
-      await retryButtons.nth(0).click();
+    while (retryCount > 0) {
+      await retryButtons.first().click();
+      await page.waitForTimeout(200);
+      retryCount = await retryButtons.count();
     }
 
-    await waitForQueueIdle();
+    await page.waitForTimeout(300);
+    await waitForQueueStable();
 
     const queue = await page.evaluate(() => {
       const raw = localStorage.getItem('app_batch_processing');
       return raw ? JSON.parse(raw) : null;
     });
     const items = Array.isArray(queue?.items) ? queue.items : [];
+    expect(items.length).toBe(10);
+
+    const created = items.filter((it: any) => Boolean(String(it?.taskId || '').trim())).length;
     const completed = items.filter((it: any) => String(it?.status) === 'completed').length;
-    const errors = items.filter((it: any) => String(it?.status) === 'error').length;
+    const reviewPending = items.filter((it: any) => String(it?.status) === 'review-pending').length;
+    const failed = items.filter((it: any) => String(it?.status) === 'failed').length;
+    const canceled = items.filter((it: any) => String(it?.status) === 'canceled').length;
+    const uploadFailed = items.filter((it: any) => String(it?.status) === 'error').length;
+    const skipped = items.filter((it: any) => String(it?.status) === 'skipped').length;
+    const terminalCount = completed + reviewPending + failed + canceled + uploadFailed + skipped;
     const after = await getDbSnapshot(request);
     const newTasks = after.parseTasks.filter((t: any) => !beforeTaskIds.has(String(t?.id || '')));
     const newMaterials = after.materials.filter((m: any) => !beforeMaterialIds.has(String(m?.id || '')));
@@ -163,15 +175,33 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
 
     const printAudit = () => {
       console.log(`[${runId}] newTasks=${newTasks.length} newMaterials=${newMaterials.length}`);
+      console.log(`[${runId}] queue: created=${created} completed=${completed} reviewPending=${reviewPending} failed=${failed} canceled=${canceled} uploadFailed=${uploadFailed} skipped=${skipped} terminal=${terminalCount}`);
       console.log(`[${runId}] newTasks: ${JSON.stringify(newTasksSummary, null, 2)}`);
       console.log(`[${runId}] newMaterials: ${JSON.stringify(newMaterialsSummary, null, 2)}`);
     };
 
     try {
-      expect(errors).toBe(0);
-      expect(completed).toBe(10);
-      expect(newTasks.length).toBe(completed);
-      expect(newMaterials.length).toBe(completed);
+      expect(newTasks.length).toBe(10);
+      expect(newMaterials.length).toBe(10);
+      expect(created).toBe(10);
+      expect(uploadFailed).toBe(0);
+      expect(skipped).toBe(0);
+      expect(terminalCount).toBe(10);
+      expect(completed + reviewPending + failed + canceled).toBe(10);
+      const failedItems = items.filter((it: any) => ['failed', 'canceled'].includes(String(it?.status)));
+      for (const it of failedItems) {
+        expect(String(it?.message || '').trim().length).toBeGreaterThan(0);
+      }
+      for (const m of newMaterials) {
+        expect(String(m?.metadata?.objectName || '').trim().length).toBeGreaterThan(0);
+      }
+      const materialIdSet = new Set(newMaterials.map((m: any) => String(m?.id || '')));
+      const taskMaterialIdSet = new Set(newTasks.map((t: any) => String(t?.materialId || '')));
+      expect(materialIdSet.size).toBe(10);
+      expect(taskMaterialIdSet.size).toBe(10);
+      for (const id of materialIdSet) {
+        expect(taskMaterialIdSet.has(id)).toBe(true);
+      }
     } catch (err) {
       printAudit();
       throw err;
