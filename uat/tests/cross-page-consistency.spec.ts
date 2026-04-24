@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { PDFDocument, rgb } from 'pdf-lib';
 
 /**
  * 跨页面一致性验收测试 (PRD v0.4 §8)
@@ -8,34 +9,43 @@ import { test, expect } from '@playwright/test';
 const BASE_URL = process.env.BASE_URL || 'http://localhost:8081';
 
 test.describe('Cross-Page Consistency (ParseTask Truth)', () => {
-  let materialId: number;
+  let materialId: string;
   let taskId: string;
 
   test.beforeAll(async ({ request }) => {
-    // 1. 创建素材
-    const uploadResp = await request.post('/__proxy/upload/upload', {
+    // 1. 使用 pdf-lib 生成一个有效的单页 PDF
+    const pdfDoc = await PDFDocument.create();
+    const page = pdfDoc.addPage([600, 400]);
+    page.drawText('Cross-Page Consistency Test PDF Content', { x: 50, y: 350, size: 20, color: rgb(0, 0, 0) });
+    const pdfBytes = await pdfDoc.save();
+    const pdfBuffer = Buffer.from(pdfBytes);
+
+    materialId = `cross-page-${Date.now()}`;
+
+    // 2. 直接调用主链路入口 POST /__proxy/upload/tasks
+    const resp = await request.post(`${BASE_URL}/__proxy/upload/tasks`, {
       multipart: {
         file: {
-          name: 'consistency-test.pdf',
+          name: 'cross-page-consistency.pdf',
           mimeType: 'application/pdf',
-          buffer: Buffer.from('%PDF-1.4 test'),
+          buffer: pdfBuffer,
         },
-        materialId: 'test-' + Date.now()
-      }
+        materialId,
+      },
     });
-    const uploadData = await uploadResp.json();
-    materialId = uploadData.materialId;
 
-    // 2. 创建一个 Pending 任务
-    const taskResp = await request.post('/__proxy/upload/tasks', {
-      multipart: {
-        materialId: String(materialId),
-        objectName: uploadData.objectName
-      }
-    });
-    const taskData = await taskResp.json();
-    taskId = taskData.taskId;
-    
+    // 3. 断言响应成功并获取数据
+    const bodyText = await resp.text();
+    expect(resp.ok(), `Upload failed: HTTP ${resp.status()} ${bodyText}`).toBeTruthy();
+
+    const data = JSON.parse(bodyText);
+    expect(data.taskId, 'Response should contain taskId').toBeTruthy();
+    expect(data.materialId, 'Response should contain materialId').toBeTruthy();
+    expect(data.objectName, 'Response should contain objectName').toBeTruthy();
+
+    taskId = data.taskId;
+    materialId = data.materialId;
+
     console.log(`Test Context: Material ${materialId}, Task ${taskId}`);
   });
 
