@@ -91,44 +91,84 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
     await page.goto(`${BASE_URL}/cms/workspace`);
 
     const input = page.locator('input[type="file"]').first();
-    await input.setInputFiles(selected.slice(0, 4));
-    await page.waitForTimeout(300);
-    await input.setInputFiles(selected.slice(4, 7));
-    await page.waitForTimeout(300);
-    await input.setInputFiles(selected.slice(7, 10));
+    // --- 三轮提交，总计 10 个文件 ---
+    const round1 = [allFiles[0], allFiles[1], allFiles[2], allFiles[3]];
+    const round2 = [allFiles[4], allFiles[5], allFiles[6]];
+    const round3 = [allFiles[7], allFiles[8], allFiles[9]];
 
-    const modalTitle = page.getByText('批量上传与处理');
-    const fab = page.locator('button[title="打开批处理进度"]');
-    const isModalOpen = await modalTitle.isVisible().catch(() => false);
-    if (!isModalOpen) {
-      await expect(fab).toBeVisible({ timeout: 10000 });
-      await fab.click();
-    }
-    await expect(modalTitle).toBeVisible({ timeout: 10000 });
+    const uploadBtn = page.locator('button:has-text("上传文件")');
+    const fileInput = page.locator('input[type="file"]');
 
-    const retryBtn = page.locator('button[title="重试上传"]').first();
-    await expect(retryBtn).toBeVisible({ timeout: 10000 });
+    console.log(`[${runId}] Round 1: 4 files`);
+    await uploadBtn.click();
+    await fileInput.setInputFiles(round1);
+
+    console.log(`[${runId}] Round 2: 3 files`);
+    await uploadBtn.click();
+    await fileInput.setInputFiles(round2);
+
+    console.log(`[${runId}] Round 3: 3 files`);
+    await uploadBtn.click();
+    await fileInput.setInputFiles(round3);
 
     const dumpQueue = async (label: string) => {
       const raw = await page.evaluate(() => localStorage.getItem('app_batch_processing'));
-      console.log(`[${runId}] [DUMP] ${label}:`, raw ? JSON.parse(raw) : 'EMPTY');
+      const data = raw ? JSON.parse(raw) : { items: [] };
+      console.log(`[${runId}] [DUMP] ${label}:`, JSON.stringify(data, null, 2));
+      return data;
     };
 
-    const waitForQueueStable = async () => {
-      try {
-        await page.waitForFunction(() => {
-          const raw = localStorage.getItem('app_batch_processing');
-          if (!raw) return false;
-          const data = JSON.parse(raw);
-          const items = Array.isArray(data?.items) ? data.items : [];
-          const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
-          const active = items.filter((it: any) => !terminal.has(String(it?.status)));
-          return active.length === 0;
-        }, undefined, { timeout: 15 * 60 * 1000 });
-      } catch (e) {
-        await dumpQueue('STABILITY_TIMEOUT');
-        throw e;
+    // P0: 三轮提交后立即校验队列长度，不得丢项
+    console.log(`[${runId}] Validating queue length (expect 10)...`);
+    let queueReady = false;
+    for (let i = 0; i < 10; i++) {
+      const data = await dumpQueue(`CHECK_LEN_${i}`);
+      if (data.items.length === 10) {
+        queueReady = true;
+        break;
       }
+      await page.waitForTimeout(1000);
+    }
+
+    if (!queueReady) {
+      console.error(`[${runId}] ERROR: Queue length mismatch. Selected 10 files but queue only has fewer.`);
+      await dumpQueue('FINAL_LENGTH_FAILURE');
+      throw new Error('Queue dropping items detected after 3 rounds of upload');
+    }
+
+    // P0: 改为显式轮询，避免 Playwright 内部 timeout 误截断
+    const waitForQueueStable = async (timeoutMs = 15 * 60 * 1000) => {
+      const start = Date.now();
+      const deadline = start + timeoutMs;
+      const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
+
+      while (Date.now() < deadline) {
+        const data = await page.evaluate(() => {
+          const raw = localStorage.getItem('app_batch_processing');
+          return raw ? JSON.parse(raw) : null;
+        });
+
+        if (!data || !Array.isArray(data.items)) {
+          await page.waitForTimeout(2000);
+          continue;
+        }
+
+        const items = data.items;
+        const active = items.filter((it: any) => !terminal.has(String(it?.status)));
+        const doneCount = items.length - active.length;
+        
+        console.log(`[${runId}] Queue progress: ${doneCount}/${items.length} (Active: ${active.length}), Elapsed: ${Math.round((Date.now() - start) / 1000)}s`);
+
+        if (items.length >= 10 && active.length === 0) {
+          console.log(`[${runId}] Queue stabilized.`);
+          return data;
+        }
+
+        await page.waitForTimeout(3000);
+      }
+
+      await dumpQueue('STABILITY_TIMEOUT');
+      throw new Error(`Queue did not become stable within ${timeoutMs / 1000}s`);
     };
 
     await waitForQueueStable();

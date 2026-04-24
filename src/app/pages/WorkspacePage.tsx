@@ -50,7 +50,20 @@ export function WorkspacePage() {
     el.setAttribute?.('webkitdirectory', '');
     el.setAttribute?.('directory', '');
     fetchTasks();
+
+    // P0: 开启周期性刷新，确保上传后的任务能被同步
+    const timer = setInterval(fetchTasks, 5000);
+    return () => clearInterval(timer);
   }, []);
+
+  // 当素材列表变化（尤其是新增上传）时，主动刷新一次任务列表
+  const prevMaterialsCount = useRef(state.materials.length);
+  useEffect(() => {
+    if (state.materials.length > prevMaterialsCount.current) {
+      fetchTasks();
+    }
+    prevMaterialsCount.current = state.materials.length;
+  }, [state.materials.length]);
 
   const handlePickFiles = () => {
     fileInputRef.current?.click();

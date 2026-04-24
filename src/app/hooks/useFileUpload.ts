@@ -28,20 +28,24 @@ export function useFileUpload() {
   const upload = useCallback(async (files: File[]) => {
     const list = Array.from(files || []);
     if (list.length === 0) return;
- 
+
     const invalidFiles = list.filter((f) => !validateFile(f).valid);
     const validFiles = list.filter((f) => validateFile(f).valid);
     if (validFiles.length === 0) return;
- 
+
     if (invalidFiles.length > 0) toast.error(`发现 ${invalidFiles.length} 个不符合规范的文件被过滤`);
- 
+
+    const now = Date.now();
     const items = validFiles.map((file, idx) => {
       const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-      const id = `q-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 8)}`;
+      // 增强 ID 唯一性：时间戳 + 索引 + 随机串
+      const id = `q-${now}-${idx}-${Math.random().toString(36).slice(2, 10)}`;
       return { id, file, filePath };
     });
- 
+
+    // 必须先注册内存句柄，再派发状态
     batchRegisterFiles(items.map((it) => ({ id: it.id, file: it.file })));
+    
     dispatch({
       type: 'BATCH_ADD_FILES',
       payload: {
@@ -54,6 +58,8 @@ export function useFileUpload() {
         openUi: true,
       },
     });
+
+    // 确保队列处于运行状态
     dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: false } });
     dispatch({ type: 'BATCH_SET_RUNNING', payload: { running: true } });
   }, [dispatch, validateFile]);

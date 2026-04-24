@@ -52,16 +52,20 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'BATCH_ADD_FILES': {
       const now = Date.now();
-      const nextItems = action.payload.items.map((i) => ({
-        id: i.id,
-        fileName: i.fileName,
-        fileSize: i.fileSize,
-        path: i.path,
-        status: 'pending' as const,
-        progress: 0,
-        createdAt: now,
-        updatedAt: now,
-      }));
+      const existingIds = new Set(state.batchProcessing.items.map((it) => it.id));
+      const nextItems = action.payload.items
+        .filter((i) => !existingIds.has(i.id)) // 过滤掉 ID 重复的项，防止冲突导致丢项
+        .map((i) => ({
+          id: i.id,
+          fileName: i.fileName,
+          fileSize: i.fileSize,
+          path: i.path,
+          status: 'pending' as const,
+          progress: 0,
+          createdAt: now,
+          updatedAt: now,
+        }));
+
       return {
         ...state,
         batchProcessing: {
