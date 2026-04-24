@@ -77,6 +77,39 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
   }
 
   test('Task Detail page should render without crash', async ({ page, request }) => {
+    await page.addInitScript(() => {
+      const instances: any[] = [];
+      class FakeEventSource {
+        url: string;
+        readyState: number;
+        listeners: Record<string, Array<(evt: any) => void>>;
+        onerror: ((evt: any) => void) | null;
+        constructor(url: string) {
+          this.url = url;
+          this.readyState = 1;
+          this.listeners = {};
+          this.onerror = null;
+          instances.push(this);
+        }
+        addEventListener(type: string, cb: (evt: any) => void) {
+          if (!this.listeners[type]) this.listeners[type] = [];
+          this.listeners[type].push(cb);
+        }
+        close() {
+          this.readyState = 2;
+        }
+      }
+      (window as any).EventSource = FakeEventSource;
+      (window as any).__fakeSseEmit = (type = 'task-update', data = '{}') => {
+        for (const es of instances) {
+          const list = es.listeners?.[type] || [];
+          for (const cb of list) {
+            cb(new MessageEvent(type, { data }));
+          }
+        }
+      };
+    });
+
     // 1. 先测不存在的 ID (检查空态渲染)
     await page.goto(`${BASE_URL}/cms/tasks/non-existent-id`);
 
@@ -98,6 +131,22 @@ test.describe('Dashboard Pages Smoke (Runtime Stability)', () => {
 
         // 显式等待 Tab 结构出现，避免异步加载未完成的 flaky
         await expect(page.getByText('概览')).toBeVisible({ timeout: 10000 });
+
+        const loadingText = page.locator('text=加载任务详情...');
+        await expect(loadingText).toHaveCount(0);
+
+        await page.getByRole('button', { name: '事件日志' }).click();
+        await expect(page.getByText('事件时间线')).toBeVisible({ timeout: 10000 });
+
+        await page.evaluate(() => {
+          (window as any).__fakeSseEmit?.('task-update');
+          (window as any).__fakeSseEmit?.('task-update');
+          (window as any).__fakeSseEmit?.('task-update');
+        });
+        await page.waitForTimeout(1500);
+
+        await expect(loadingText).toHaveCount(0);
+        await expect(page.getByText('事件时间线')).toBeVisible();
 
         bodyText = await page.innerText('body');
         expect(bodyText).not.toContain('ReferenceError');

@@ -149,10 +149,12 @@ export function TaskDetailPage() {
   const [material, setMaterial] = useState<any | null>(null);
   const [events, setEvents] = useState<TaskEvent[]>([]);
   const [aiJobs, setAiJobs] = useState<AiMetadataJob[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [notFound, setNotFound] = useState(false);
   const [optionsExpanded, setOptionsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'markdown' | 'pdf' | 'metadata' | 'events'>('overview');
+  const hasLoadedOnceRef = useRef(false);
 
   // ── Markdown 预览相关状态 ──────────────────────────────────
   const [mdContent, setMdContent] = useState('');
@@ -190,10 +192,18 @@ export function TaskDetailPage() {
   /**
    * 从后端加载任务详情、事件日志、关联 AI Jobs 和 Material 资源状态
    */
-  const fetchData = async () => {
+  const fetchData = async (options?: { background?: boolean }) => {
     if (!id) return;
-    setLoading(true);
-    setNotFound(false);
+    const background = options?.background === true;
+    const shouldUseInitialLoading = !background && !hasLoadedOnceRef.current;
+
+    if (shouldUseInitialLoading) {
+      setInitialLoading(true);
+    } else {
+      setRefreshing(true);
+    }
+
+    if (!background) setNotFound(false);
     try {
       const [taskRes, eventsRes, aiJobsRes] = await Promise.all([
         fetch(`/__proxy/db/tasks/${encodeURIComponent(id)}`),
@@ -212,6 +222,7 @@ export function TaskDetailPage() {
 
       const taskData = await taskRes.json();
       setTask(taskData);
+      hasLoadedOnceRef.current = true;
 
       if (eventsRes.ok) {
         const eventsData = await eventsRes.json();
@@ -255,11 +266,20 @@ export function TaskDetailPage() {
     } catch (err) {
       toast.error('加载任务详情失败', { description: String(err) });
     } finally {
-      setLoading(false);
+      if (shouldUseInitialLoading) setInitialLoading(false);
+      setRefreshing(false);
     }
   };
 
   useEffect(() => {
+    hasLoadedOnceRef.current = false;
+    setInitialLoading(true);
+    setRefreshing(false);
+    setNotFound(false);
+    setTask(null);
+    setMaterial(null);
+    setEvents([]);
+    setAiJobs([]);
     fetchData();
   }, [id]);
 
@@ -321,6 +341,7 @@ export function TaskDetailPage() {
 
   // ── SSE 增量刷新（PRD v0.4 §10.2.2）──────────────────────
   const sseRef = useRef<EventSource | null>(null);
+  const sseRefreshTimerRef = useRef<number | null>(null);
   useEffect(() => {
     if (!id) return;
     if (sseRef.current) return;
@@ -328,7 +349,11 @@ export function TaskDetailPage() {
       const es = new EventSource(`/__proxy/upload/tasks/stream?taskId=${encodeURIComponent(id)}`);
       sseRef.current = es;
       es.addEventListener('task-update', () => {
-        fetchData();
+        if (sseRefreshTimerRef.current != null) window.clearTimeout(sseRefreshTimerRef.current);
+        sseRefreshTimerRef.current = window.setTimeout(() => {
+          sseRefreshTimerRef.current = null;
+          fetchData({ background: true });
+        }, 1000);
       });
       es.onerror = () => { /* 自动重连 */ };
     } catch (e) {
@@ -337,6 +362,8 @@ export function TaskDetailPage() {
     return () => {
       sseRef.current?.close();
       sseRef.current = null;
+      if (sseRefreshTimerRef.current != null) window.clearTimeout(sseRefreshTimerRef.current);
+      sseRefreshTimerRef.current = null;
     };
   }, [id]);
 
@@ -356,7 +383,7 @@ export function TaskDetailPage() {
       if (action === 'retry' && payload?.newTaskId) {
         navigate(`/tasks/${encodeURIComponent(payload.newTaskId)}`);
       } else {
-        fetchData();
+        fetchData({ background: true });
       }
     } catch (err) {
       toast.error(`${action} 失败`, { description: String(err) });
@@ -378,7 +405,7 @@ export function TaskDetailPage() {
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload?.error || `HTTP ${res.status}`);
       toast.success('审核通过', { description: `任务已进入 completed` });
-      fetchData();
+      fetchData({ background: true });
     } catch (err) {
       toast.error('审核提交失败', { description: String(err) });
     }
@@ -413,7 +440,7 @@ export function TaskDetailPage() {
   };
 
   // ─── 加载中 ──────────────────────────────────────────────────
-  if (loading) {
+  if (initialLoading) {
     return (
       <div className="p-6 flex items-center justify-center h-full">
         <div className="flex flex-col items-center gap-3">
@@ -487,11 +514,12 @@ export function TaskDetailPage() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <button
-            onClick={fetchData}
-            className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors"
+            onClick={() => fetchData({ background: true })}
+            className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium hover:bg-slate-50 transition-colors disabled:opacity-60"
             title="刷新"
+            disabled={refreshing}
           >
-            <RefreshCw className="w-4 h-4" />
+            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
             刷新
           </button>
           <button
