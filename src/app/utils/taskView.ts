@@ -116,7 +116,11 @@ const STATE_LABELS: Record<string, string> = {
   canceled: '已取消',
 };
 
-export function deriveMaterialTaskView(material: Material | undefined, tasks: ParseTask[]): MaterialTaskView {
+export function deriveMaterialTaskView(
+  material: Material | undefined,
+  tasks: ParseTask[],
+  options?: { tasksLoaded?: boolean }
+): MaterialTaskView {
   // P0 防御：material 未定义时返回安全默认值
   if (!material) {
     return {
@@ -131,6 +135,7 @@ export function deriveMaterialTaskView(material: Material | undefined, tasks: Pa
     };
   }
 
+  const tasksLoaded = options?.tasksLoaded ?? true; // 默认认为已加载完成，除非显式传入 false
   const currentTask = deriveCurrentTask(material.id, tasks);
   const bucket = deriveTaskBucket(currentTask?.state);
   
@@ -162,7 +167,8 @@ export function deriveMaterialTaskView(material: Material | undefined, tasks: Pa
       view.hasStateDrift = true;
       view.driftReason = '任务显示完成但缺少解析产物';
     }
-  } else {
+  } else if (tasksLoaded) {
+    // 只有在任务列表确实加载完成，且依然找不到任务时，才报告漂移
     // 无任务但素材处于 processing
     if (material.status === 'processing') {
       view.hasStateDrift = true;

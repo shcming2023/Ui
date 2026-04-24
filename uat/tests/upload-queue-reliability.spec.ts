@@ -109,16 +109,26 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
     const retryBtn = page.locator('button[title="重试上传"]').first();
     await expect(retryBtn).toBeVisible({ timeout: 10000 });
 
+    const dumpQueue = async (label: string) => {
+      const raw = await page.evaluate(() => localStorage.getItem('app_batch_processing'));
+      console.log(`[${runId}] [DUMP] ${label}:`, raw ? JSON.parse(raw) : 'EMPTY');
+    };
+
     const waitForQueueStable = async () => {
-      await page.waitForFunction(() => {
-        const raw = localStorage.getItem('app_batch_processing');
-        if (!raw) return false;
-        const data = JSON.parse(raw);
-        const items = Array.isArray(data?.items) ? data.items : [];
-        const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
-        const active = items.filter((it: any) => !terminal.has(String(it?.status)));
-        return active.length === 0;
-      }, { timeout: 15 * 60 * 1000 });
+      try {
+        await page.waitForFunction(() => {
+          const raw = localStorage.getItem('app_batch_processing');
+          if (!raw) return false;
+          const data = JSON.parse(raw);
+          const items = Array.isArray(data?.items) ? data.items : [];
+          const terminal = new Set(['completed', 'review-pending', 'failed', 'canceled', 'error', 'skipped']);
+          const active = items.filter((it: any) => !terminal.has(String(it?.status)));
+          return active.length === 0;
+        }, undefined, { timeout: 15 * 60 * 1000 });
+      } catch (e) {
+        await dumpQueue('STABILITY_TIMEOUT');
+        throw e;
+      }
     };
 
     await waitForQueueStable();
@@ -203,6 +213,7 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
         expect(taskMaterialIdSet.has(id)).toBe(true);
       }
     } catch (err) {
+      await dumpQueue('ASSERTION_FAILURE');
       printAudit();
       throw err;
     }

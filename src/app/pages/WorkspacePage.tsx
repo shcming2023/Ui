@@ -26,6 +26,7 @@ export function WorkspacePage() {
   const folderInputRef = useRef<HTMLInputElement | null>(null);
   const { upload, uploading, progress } = useFileUpload();
   const [tasks, setTasks] = useState<ParseTask[]>([]);
+  const [tasksLoaded, setTasksLoaded] = useState(false);
 
   const fetchTasks = async () => {
     try {
@@ -33,9 +34,11 @@ export function WorkspacePage() {
       if (res.ok) {
         const data = await res.json();
         setTasks(Array.isArray(data) ? data : []);
+        setTasksLoaded(true);
       }
     } catch (e) {
       console.warn('[Workspace] fetchTasks failed:', e);
+      setTasksLoaded(true); // 即使失败也标记为尝试过加载
     }
   };
  
@@ -70,7 +73,7 @@ export function WorkspacePage() {
   }, [state.materials]);
 
   const getFilterKey = (m: Material): FilterKey => {
-    const view = deriveMaterialTaskView(m, tasks);
+    const view = deriveMaterialTaskView(m, tasks, { tasksLoaded });
     if (view.bucket === 'failed' || view.bucket === 'canceled') return 'failed';
     if (view.bucket === 'completed') return 'completed';
     if (view.bucket === 'queued') return 'pending';
@@ -320,7 +323,7 @@ export function WorkspacePage() {
                   <td className="px-4 py-3">
                     <div className="flex flex-col gap-1">
                       {(() => {
-                        const view = deriveMaterialTaskView(material, tasks);
+                        const view = deriveMaterialTaskView(material, tasks, { tasksLoaded });
                         return (
                           <>
                             <div className="flex items-center gap-1.5">
