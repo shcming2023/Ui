@@ -17,6 +17,11 @@ export function useFileUpload() {
     if (file.size > maxSize) {
       return { valid: false as const, error: `文件 "${file.name}" 超过上传限制 (最大 ${Math.round(maxSize / (1024 * 1024))}MB)` };
     }
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const supportedExts = new Set(['pdf', 'doc', 'docx', 'ppt', 'pptx', 'jpg', 'jpeg', 'png', 'md']);
+    if (!supportedExts.has(ext)) {
+      return { valid: false as const, error: `不支持的文件格式: ${file.name}` };
+    }
     return { valid: true as const };
   }, [state.mineruConfig.maxFileSize]);
  

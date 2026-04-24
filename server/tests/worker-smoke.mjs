@@ -3,6 +3,7 @@
  * 验证 AI Worker 是否能正确加载 MinIO 上下文并读取 Markdown 文件
  */
 import { AiMetadataWorker } from '../services/ai/metadata-worker.mjs';
+import { ParseTaskWorker } from '../services/queue/task-worker.mjs';
 
 async function runTest() {
   console.log('--- AI Worker Smoke Test Start ---');
@@ -71,6 +72,89 @@ async function runTest() {
   }
 
   console.log('--- AI Worker Smoke Test Success ---');
+
+  console.log('--- ParseTask Worker Reliability Test Start ---');
+
+  const calls = {
+    updateTask: [],
+    updateMaterial: [],
+  };
+
+  let failOnce = true;
+  const mockTaskClient = {
+    getAllTasks: async () => [],
+    updateTask: async (_id, update) => {
+      calls.updateTask.push(update);
+      if (failOnce) {
+        failOnce = false;
+        return false;
+      }
+      return true;
+    },
+    updateMaterial: async (_id, update) => {
+      calls.updateMaterial.push(update);
+      return true;
+    },
+  };
+
+  const mockMinio = {
+    getFileStream: async () => ({}),
+    saveMarkdown: async () => {},
+    saveObject: async () => {},
+  };
+
+  const worker = new ParseTaskWorker({
+    minioContext: mockMinio,
+    taskClient: mockTaskClient,
+    mineruProcessor: async () => {
+      throw new Error('fetch failed');
+    }
+  });
+
+  const mockTask = {
+    id: 'smoke-parse-task-1',
+    engine: 'local-mineru',
+    state: 'pending',
+    stage: 'upload',
+    progress: 0,
+    materialId: 'smoke-material-1',
+    optionsSnapshot: {
+      localTimeout: 1,
+      material: {
+        fileName: 'smoke.pdf',
+        mimeType: 'application/pdf',
+        metadata: { objectName: 'originals/smoke-material-1/source.pdf' }
+      }
+    },
+    metadata: {},
+  };
+
+  try {
+    await worker.processTask(mockTask);
+  } catch (err) {
+    console.error('❌ FAILED: ParseTaskWorker processTask threw:', err.message);
+    process.exit(1);
+  }
+
+  const hasFailedUpdate = calls.updateTask.some((u) => u && u.state === 'failed');
+  if (!hasFailedUpdate) {
+    console.error('❌ FAILED: expected a failed task patch to be written');
+    process.exit(1);
+  }
+
+  if (calls.updateTask.length < 2) {
+    console.error('❌ FAILED: expected updateTask retry when first call fails');
+    process.exit(1);
+  }
+
+  const hasMaterialFailed = calls.updateMaterial.some((u) => u && u.status === 'failed');
+  if (!hasMaterialFailed) {
+    console.error('❌ FAILED: expected material to be marked failed');
+    process.exit(1);
+  }
+
+  console.log('✅ PASSED: ParseTask worker failure is reliably written even if first updateTask fails.');
+  console.log('--- ParseTask Worker Reliability Test Success ---');
 }
 
 runTest();

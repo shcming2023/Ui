@@ -16,6 +16,7 @@ import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
 // 约束 3: 集中配置常量
 const POLL_INTERVAL_MS = 10000; // 10秒检查一次
 const SIMULATED_DELAY_MS = 5000; // 每个阶段模拟耗时 5秒
+const MAX_CONCURRENT_TASKS = 1;
 
 // stale-running 自愈缓冲期（PRD v0.4 §9.3）
 const STALE_GRACE_MS = 60_000;
@@ -45,6 +46,10 @@ export class ParseTaskWorker {
     this.minioContext = options.minioContext
       || (typeof options.getFileStream === 'function' ? options : null);
     this.eventBus = options.eventBus || null;
+    this.taskClient = options.taskClient || { getAllTasks, updateTask, updateMaterial };
+    this.mineruProcessor = options.mineruProcessor || processWithLocalMinerU;
+    this.pendingTaskPatches = new Map();
+    this.pendingMaterialPatches = new Map();
   }
 
   /** 将 ReadableStream 转换为 Buffer */
@@ -89,16 +94,21 @@ export class ParseTaskWorker {
   }
 
   async scanAndProcess() {
-    const tasks = await getAllTasks();
+    await this.flushPendingPatches();
+    const tasks = await this.taskClient.getAllTasks();
 
     // 每轮 tick 顺便检查一次 stale-running 任务（不阻塞 pending 调度）
     await this.recoverStaleRunningTasks(tasks);
 
     const pendingTasks = tasks.filter(t => t.state === 'pending');
+    const available = Math.max(0, MAX_CONCURRENT_TASKS - processingMap.size);
+    let started = 0;
     for (const task of pendingTasks) {
+      if (started >= available) break;
       if (processingMap.has(task.id)) continue;
       // 异步处理，不阻塞 tick 扫描下一个
       this.processTask(task);
+      started += 1;
     }
   }
 
@@ -114,7 +124,7 @@ export class ParseTaskWorker {
    */
   async runRecoveryScan() {
     try {
-      const tasks = await getAllTasks();
+      const tasks = await this.taskClient.getAllTasks();
       const now = Date.now();
       let recovered = 0;
       for (const task of tasks) {
@@ -125,7 +135,7 @@ export class ParseTaskWorker {
         // 但“本进程启动恢复”的语义是：无论时间多久，running/result-store 在启动时先归位为 pending，
         // 由轮询重新拾取，避免重启后任务永久卡死。
         const isExplicitlyStale = updatedAt > 0 && (now - updatedAt) > (timeoutMs + STALE_GRACE_MS);
-        await updateTask(task.id, {
+        await this.updateTaskWithRetry(task.id, {
           state: 'pending',
           stage: 'upload',
           progress: 0,
@@ -133,7 +143,7 @@ export class ParseTaskWorker {
             ? `检测到卡住的解析任务，已自动重置为 pending。updatedAt=${task.updatedAt}`
             : '服务重启恢复：在执行中的任务已重置为 pending等待重新拾取',
           updatedAt: new Date().toISOString(),
-        });
+        }, { enqueueOnFailure: true });
         await logTaskEvent({
           taskId: task.id,
           taskType: 'parse',
@@ -167,13 +177,13 @@ export class ParseTaskWorker {
       if (!updatedAt) continue;
       const timeoutMs = Number(task.optionsSnapshot?.localTimeout || 3600) * 1000;
       if ((now - updatedAt) <= (timeoutMs + STALE_GRACE_MS)) continue;
-      await updateTask(task.id, {
+      await this.updateTaskWithRetry(task.id, {
         state: 'pending',
         stage: 'upload',
         progress: 0,
         message: `检测到卡住的解析任务（超过 ${Math.round((timeoutMs + STALE_GRACE_MS) / 1000)}s不更新），已重置为 pending`,
         updatedAt: new Date().toISOString(),
-      });
+      }, { enqueueOnFailure: true });
       await logTaskEvent({
         taskId: task.id,
         taskType: 'parse',
@@ -239,7 +249,7 @@ export class ParseTaskWorker {
           zipObjectName = null;
           artifactIncomplete = false;
         } else {
-          const mineruResult = await processWithLocalMinerU({
+          const mineruResult = await this.mineruProcessor({
             task,
             material: materialInfo,
             fileStream,
@@ -310,7 +320,7 @@ export class ParseTaskWorker {
         }, 'worker-completed');
 
         // 补齐 Material 状态：确保 AI 阶段开始前，Material 表达“解析阶段完成” (Requirement 3)
-        await updateMaterial(task.materialId, {
+        await this.updateMaterialWithRetry(task.materialId, {
           mineruStatus: 'completed',
           metadata: {
             ...(materialInfo.metadata || {}),
@@ -323,7 +333,7 @@ export class ParseTaskWorker {
             processingMsg: '解析完成，等待 AI 元数据识别',
             processingUpdatedAt: new Date().toISOString()
           }
-        });
+        }, { enqueueOnFailure: true });
 
         // ── 解析成功后自动创建 AI Metadata Job ──────────────────
         await this.tryCreateAiJob(task, markdownObjectName);
@@ -377,6 +387,19 @@ export class ParseTaskWorker {
         errorMessage: error.message,
         message: `[${modeLabel}] 执行失败: ${error.message}`
       }, 'worker-failed', 'error');
+
+      if (task.materialId) {
+        await this.updateMaterialWithRetry(task.materialId, {
+          status: 'failed',
+          mineruStatus: 'failed',
+          aiStatus: 'failed',
+          metadata: {
+            processingStage: '',
+            processingMsg: `解析失败: ${error.message}`,
+            processingUpdatedAt: new Date().toISOString(),
+          }
+        }, { enqueueOnFailure: true });
+      }
     } finally {
       processingMap.delete(task.id);
     }
@@ -461,7 +484,7 @@ export class ParseTaskWorker {
   }
 
   async transition(task, update, eventName, level = 'info') {
-    const success = await updateTask(task.id, update);
+    const success = await this.updateTaskWithRetry(task.id, update, { enqueueOnFailure: true });
     if (success) {
       await logTaskEvent({
         taskId: task.id,
@@ -489,5 +512,44 @@ export class ParseTaskWorker {
 
   sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async updateTaskWithRetry(taskId, update, opts = {}) {
+    const maxAttempts = Number.isFinite(opts.maxAttempts) ? opts.maxAttempts : 5;
+    for (let i = 0; i < maxAttempts; i++) {
+      const ok = await this.taskClient.updateTask(taskId, update);
+      if (ok) return true;
+      await this.sleep(Math.min(5000, 300 * Math.pow(2, i)));
+    }
+    if (opts.enqueueOnFailure) {
+      this.pendingTaskPatches.set(String(taskId), update);
+    }
+    return false;
+  }
+
+  async updateMaterialWithRetry(materialId, update, opts = {}) {
+    const maxAttempts = Number.isFinite(opts.maxAttempts) ? opts.maxAttempts : 5;
+    for (let i = 0; i < maxAttempts; i++) {
+      const ok = await this.taskClient.updateMaterial(materialId, update);
+      if (ok) return true;
+      await this.sleep(Math.min(5000, 300 * Math.pow(2, i)));
+    }
+    if (opts.enqueueOnFailure) {
+      this.pendingMaterialPatches.set(String(materialId), update);
+    }
+    return false;
+  }
+
+  async flushPendingPatches() {
+    const taskEntries = Array.from(this.pendingTaskPatches.entries());
+    for (const [taskId, patch] of taskEntries) {
+      const ok = await this.taskClient.updateTask(taskId, patch);
+      if (ok) this.pendingTaskPatches.delete(taskId);
+    }
+    const materialEntries = Array.from(this.pendingMaterialPatches.entries());
+    for (const [materialId, patch] of materialEntries) {
+      const ok = await this.taskClient.updateMaterial(materialId, patch);
+      if (ok) this.pendingMaterialPatches.delete(materialId);
+    }
   }
 }

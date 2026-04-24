@@ -2065,6 +2065,16 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
     }
 
     const materialId = (req.body?.materialId || `mat-${Date.now()}`).toString();
+    const fixedOriginalName = fixFilenameEncoding(req.file.originalname);
+    const extLower = (fixedOriginalName.split('.').pop() || '').toLowerCase();
+    const supportedExts = new Set(['pdf', 'doc', 'docx', 'ppt', 'pptx', 'jpg', 'jpeg', 'png', 'md']);
+    if (!supportedExts.has(extLower)) {
+      cleanupTempFile(req.file);
+      return res.status(400).json({
+        error: `不支持的文件格式: .${extLower || 'unknown'}`,
+        code: 'UNSUPPORTED_FORMAT',
+      });
+    }
 
     // 0. 幂等检查：防止同一素材重复创建活跃任务
     try {
@@ -2099,7 +2109,7 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
     // 1. 上传文件到 MinIO
     const bucket = getMinioBucket();
     // 统一 objectName 命名规则：originals/{materialId}/source.{ext} (Requirement 6)
-    const ext = req.file.originalname.split('.').pop() || 'bin';
+    const ext = extLower || 'bin';
     const objectName = `originals/${materialId}/source.${ext}`;
     await streamUploadToMinIO(req.file, bucket, objectName, req.file.mimetype);
 
@@ -2120,12 +2130,12 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       status: 'processing',
       mineruStatus: existingMaterial?.mineruStatus || 'pending', // 显式初始化
       aiStatus: existingMaterial?.aiStatus || 'pending',         // 显式初始化
-      fileName: req.file.originalname,
-      title: req.file.originalname.replace(/\.[^/.]+$/, ''),
+      fileName: fixedOriginalName,
+      title: fixedOriginalName.replace(/\.[^/.]+$/, ''),
       fileSize: req.file.size,
       mimeType: req.file.mimetype,
       // 补齐必选字段 (Requirement 2)
-      type: detectFormat(req.file.mimetype, req.file.originalname),
+      type: detectFormat(req.file.mimetype, fixedOriginalName),
       tags: existingMaterial?.tags || [],
       updateTime: Date.now(),
       createTime: existingMaterial?.createTime || Date.now(),
@@ -2221,7 +2231,7 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       materialId,
       objectName,
       url: presignedUrl,
-      fileName: req.file.originalname,
+      fileName: fixedOriginalName,
       provider: 'minio',
       mimeType: req.file.mimetype
     });
