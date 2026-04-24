@@ -60,6 +60,9 @@ export function useFileUpload() {
     });
 
     // 确保队列处于运行状态
+    if (bp.running) {
+      toast.success(`已加入上传队列 (${items.length} 个文件)`);
+    }
     dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: false } });
     dispatch({ type: 'BATCH_SET_RUNNING', payload: { running: true } });
   }, [dispatch, validateFile]);

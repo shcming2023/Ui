@@ -205,7 +205,6 @@ export function WorkspacePage() {
         <div className="flex items-center gap-2">
           <div className="flex bg-blue-600 rounded-lg overflow-hidden text-white text-sm">
             <button
-              disabled={uploading}
               onClick={handlePickFiles}
               className="flex items-center gap-1.5 px-4 py-2 hover:bg-blue-700 disabled:opacity-60"
               type="button"
@@ -214,7 +213,6 @@ export function WorkspacePage() {
             </button>
             <div className="w-px bg-blue-500 my-2" />
             <button
-              disabled={uploading}
               onClick={handlePickFolder}
               className="flex items-center gap-1.5 px-3 py-2 hover:bg-blue-700 disabled:opacity-60"
               type="button"
