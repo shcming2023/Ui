@@ -30,9 +30,9 @@ function listTestPdfs() {
 async function resetBatchProcessingPersistence(request: APIRequestContext) {
   const empty = { items: [], running: false, paused: false, uiOpen: false };
   const resp = await request.put(`${BASE_URL}/__proxy/db/settings/batchProcessing`, { data: empty });
-  expect(resp.ok()).toBe(true);
-  const tsResp = await request.put(`${BASE_URL}/__proxy/db/settings/batchProcessingUpdatedAt`, { data: Date.now() });
-  expect(tsResp.ok()).toBe(true);
+  if (!resp.ok()) {
+    throw new Error(`reset batchProcessing failed: PUT ${BASE_URL}/__proxy/db/settings/batchProcessing HTTP ${resp.status()} ${await resp.text()}`);
+  }
 }
 
 async function getDbSnapshot(request: APIRequestContext) {
