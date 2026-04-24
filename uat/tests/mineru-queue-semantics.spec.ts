@@ -292,4 +292,38 @@ test.describe('MinerU Queue Semantics (Strict Mock-Driven UAT)', () => {
     await expect(page.getByText(MOCK_MINERU_TASK_ID, { exact: true })).toBeVisible({ timeout: 5000 });
     await expect(page.getByText('0 (前方)', { exact: true })).toBeVisible({ timeout: 5000 });
   });
+
+  test('任务管理页列表语义：mineru-queued 不得显示为解析中', async ({ page }) => {
+    // 构造一个处于 state=running, stage=mineru-queued 的任务
+    const queuedTask = {
+      id: MOCK_TASK_ID,
+      materialId: MOCK_MATERIAL_ID,
+      engine: 'local-mineru',
+      stage: 'mineru-queued',
+      state: 'running', // 这里是 running，但 stage 决定了它还在排队
+      progress: 20,
+      message: `MinerU 排队中 (前方 3 个任务)`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await page.route(`**/__proxy/db/tasks`, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify([queuedTask]) });
+    });
+    await page.route(`**/__proxy/db/materials`, async (route) => {
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '[]' });
+    });
+    await page.route('**/__proxy/upload/tasks/stream**', async (route) => {
+      await route.fulfill({ status: 200, contentType: 'text/event-stream', body: '' });
+    });
+
+    await page.goto('/cms/tasks');
+    await expect(page.locator('h1').filter({ hasText: '任务管理' })).toBeVisible();
+
+    // 断言必须展示 "MinerU 排队中" 而不是 "解析中"
+    const row = page.locator('tr').filter({ hasText: MOCK_TASK_ID });
+    await expect(row.getByText('MinerU 排队中', { exact: true })).toBeVisible();
+    await expect(row.getByText('解析中', { exact: true })).not.toBeVisible();
+  });
 });
+

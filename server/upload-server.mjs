@@ -44,6 +44,7 @@ import os from 'os';
 import { registerConsistencyRoutes } from './lib/consistency-routes.mjs';
 import { registerTaskActionRoutes } from './lib/task-actions-routes.mjs';
 import { taskEventBus } from './lib/task-events-bus.mjs';
+import { registerMineruDiagnosticsRoutes } from './lib/ops-mineru-diagnostics.mjs';
 import { ParseTaskWorker } from './services/queue/task-worker.mjs';
 import { AiMetadataWorker } from './services/ai/metadata-worker.mjs';
 
@@ -553,6 +554,8 @@ app.get('/ops/health', async (req, res) => {
 
   res.json(results);
 });
+
+registerMineruDiagnosticsRoutes(app, () => process.env.DB_BASE_URL || 'http://localhost:8789');
 
 function toDownloadUrl(url) {
   if (!url) return '';

@@ -26,8 +26,10 @@ export type TaskBucket = 'queued' | 'processing' | 'reviewing' | 'completed' | '
 /**
  * 根据任务状态派生展示桶 (PRD v0.4 §6.3)
  */
-export function deriveTaskBucket(state: string | undefined): TaskBucket {
+export function deriveTaskBucket(state: string | undefined, stage?: string): TaskBucket {
   if (!state) return 'unknown';
+
+  if (state === 'running' && stage === 'mineru-queued') return 'queued';
   
   switch (state) {
     case 'uploading':
@@ -137,7 +139,7 @@ export function deriveMaterialTaskView(
 
   const tasksLoaded = options?.tasksLoaded ?? true; // 默认认为已加载完成，除非显式传入 false
   const currentTask = deriveCurrentTask(material.id, tasks);
-  const bucket = deriveTaskBucket(currentTask?.state);
+  const bucket = deriveTaskBucket(currentTask?.state, currentTask?.stage);
   
   // 基础信息
   const view: MaterialTaskView = {

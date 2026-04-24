@@ -39,6 +39,7 @@ interface OpsHealthReport {
  */
 export function OpsHealthPage() {
   const [report, setReport] = useState<OpsHealthReport | null>(null);
+  const [diagnostics, setDiagnostics] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [lastRefreshed, setLastRefreshed] = useState<Date>(new Date());
 
@@ -46,12 +47,21 @@ export function OpsHealthPage() {
     setLoading(true);
     try {
       // 聚合健康检查接口（稍后在 upload-server 中实现）
-      const res = await fetch('/__proxy/upload/ops/health');
+      const [res, diagRes] = await Promise.all([
+        fetch('/__proxy/upload/ops/health'),
+        fetch('/__proxy/upload/ops/mineru/diagnostics')
+      ]);
+      
       if (res.ok) {
         const data = await res.json();
         setReport(data);
       } else {
         throw new Error(`HTTP ${res.status}`);
+      }
+
+      if (diagRes.ok) {
+        const diagData = await diagRes.json();
+        setDiagnostics(diagData);
       }
     } catch (err) {
       console.error('[OpsHealthPage] Failed to fetch health report', err);
@@ -211,6 +221,52 @@ export function OpsHealthPage() {
               />
             </div>
           </div>
+
+          {diagnostics && (
+            <div className="mb-12">
+              <div className="flex items-center gap-2 mb-6">
+                <div className="w-1 h-4 bg-orange-500 rounded-full" />
+                <h2 className="text-sm font-black text-slate-400 uppercase tracking-widest">MinerU 通畅诊断</h2>
+              </div>
+              <div className={`p-6 rounded-3xl border transition-all duration-300 ${diagnostics.diagnosis.kind === 'orphan-processing-blocker' ? 'bg-orange-50 border-orange-200' : 'bg-slate-50 border-slate-100'}`}>
+                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900">MinerU 队列状态: {diagnostics.diagnosis.status}</h3>
+                    <p className="text-xs text-slate-500 mt-1">
+                      MinerU 内部：处理中 {diagnostics.mineru.processingTasks}，排队中 {diagnostics.mineru.queuedTasks} | 
+                      Luceon 追踪：处理中 {diagnostics.luceon.mineruProcessingTasks.length}，排队中 {diagnostics.luceon.mineruQueuedTasks.length}
+                    </p>
+                  </div>
+                  {diagnostics.diagnosis.kind === 'orphan-processing-blocker' && (
+                    <div className="bg-red-100 text-red-700 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4" /> 发现阻塞风险
+                    </div>
+                  )}
+                </div>
+
+                {diagnostics.diagnosis.kind === 'orphan-processing-blocker' && (
+                  <div className="bg-white border border-red-200 rounded-xl p-4 shadow-sm">
+                    <h4 className="text-sm font-bold text-red-600 flex items-center gap-2">
+                      MinerU 当前被未知任务占用，Luceon 队列暂停推进。请先执行人工清障。
+                    </h4>
+                    <p className="text-xs text-slate-600 mt-2">
+                      诊断结果: {diagnostics.diagnosis.message}<br />
+                      占用 Task ID: {diagnostics.diagnosis.blockingMineruTaskId}
+                    </p>
+                    <div className="mt-4 bg-slate-50 p-3 rounded-lg border border-slate-100">
+                      <p className="text-xs font-semibold text-slate-700 mb-2">恢复建议（干跑）：</p>
+                      <ol className="text-xs text-slate-600 list-decimal pl-4 space-y-1">
+                        <li>停止 mineru_api tmux session</li>
+                        <li>重新启动 conda mineru-api</li>
+                        <li>运行 node server/tests/mineru-deep-check.mjs</li>
+                        <li>确认 queued tasks 继续推进</li>
+                      </ol>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* System Info Footer */}
           <div className="p-8 bg-slate-50 rounded-[2.5rem] border border-slate-100 flex flex-col md:flex-row items-center justify-between gap-6">

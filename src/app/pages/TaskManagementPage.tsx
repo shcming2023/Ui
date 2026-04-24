@@ -43,12 +43,12 @@ const BUCKET_LABELS: Record<BucketKey, string> = {
   unknown: '未知',
 };
 
-function bucketOf(state: string | undefined): BucketKey {
-  return deriveTaskBucket(state);
+function bucketOf(state: string | undefined, stage?: string): BucketKey {
+  return deriveTaskBucket(state, stage);
 }
 
-function stateBadgeClass(state: string | undefined): string {
-  const b = bucketOf(state);
+function stateBadgeClass(state: string | undefined, stage?: string): string {
+  const b = bucketOf(state, stage);
   if (b === 'completed') return 'bg-green-50 text-green-700 border border-green-100';
   if (b === 'failed') return 'bg-red-50 text-red-700 border border-red-100';
   if (b === 'canceled') return 'bg-gray-100 text-gray-500 border border-gray-200';
@@ -227,7 +227,7 @@ export function TaskManagementPage() {
 
   const filteredTasks = useMemo(() => {
     if (filter === 'all') return tasks;
-    return tasks.filter((t) => bucketOf(t.state) === filter);
+    return tasks.filter((t) => bucketOf(t.state, t.stage) === filter);
   }, [tasks, filter]);
 
   const counts = useMemo(() => {
@@ -235,7 +235,7 @@ export function TaskManagementPage() {
       all: tasks.length,
       queued: 0, processing: 0, reviewing: 0, completed: 0, failed: 0, canceled: 0, unknown: 0,
     };
-    for (const t of tasks) c[bucketOf(t.state)] += 1;
+    for (const t of tasks) c[bucketOf(t.state, t.stage)] += 1;
     return c;
   }, [tasks]);
 
@@ -334,7 +334,7 @@ export function TaskManagementPage() {
                 </tr>
               ) : (
                 filteredTasks.map((t) => {
-                  const bucket = bucketOf(t.state);
+                  const bucket = bucketOf(t.state, t.stage);
                   const canRetry = t.state === 'failed';
                   const canReparse = t.state === 'failed' || t.state === 'completed' || t.state === 'review-pending' || t.state === 'canceled';
                   const canReAi = t.state === 'failed' || t.state === 'completed' || t.state === 'review-pending';
@@ -372,8 +372,10 @@ export function TaskManagementPage() {
                       <td className="px-6 py-4">
                         <div className="flex flex-col gap-2">
                           <div className="flex items-center gap-2">
-                            <span className={`inline-flex items-center px-2 py-0.5 text-xs font-bold rounded-full ${stateBadgeClass(t.state)}`}>
-                              {zhLabelForState(t.state)}
+                            <span className={`inline-flex items-center px-2 py-0.5 text-xs font-bold rounded-full ${stateBadgeClass(t.state, t.stage)}`}>
+                              {t.stage === 'mineru-queued' ? 'MinerU 排队中' :
+                               t.stage === 'mineru-processing' ? 'MinerU 正在解析' :
+                               zhLabelForState(t.state)}
                             </span>
                             {(() => {
                               const diag = diagnoseStatus(t);
