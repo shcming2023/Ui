@@ -2199,12 +2199,12 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
     const optionsSnapshot = {
       localEndpoint: mineruConfig.localEndpoint || 'http://host.docker.internal:8083',
       localTimeout: mineruConfig.localTimeout || 3600,
-      backend: mineruConfig.backend || 'pipeline',
-      ocrLanguage: mineruConfig.ocrLanguage || 'ch',
+      backend: mineruConfig.localBackend || mineruConfig.backend || 'pipeline',
+      ocrLanguage: mineruConfig.localOcrLanguage || mineruConfig.ocrLanguage || 'ch',
       enableOcr: mineruConfig.enableOcr,
       enableFormula: mineruConfig.enableFormula,
       enableTable: mineruConfig.enableTable,
-      maxPages: mineruConfig.maxPages || 1000,
+      maxPages: mineruConfig.localMaxPages || mineruConfig.maxPages || 1000,
       ...req.body,
       material
     };

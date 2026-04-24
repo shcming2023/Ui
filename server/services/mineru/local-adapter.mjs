@@ -87,9 +87,18 @@ export async function processWithLocalMinerU({ task, material, fileStream, fileN
   });
 
   if (fastApiResponse.status !== 404 && fastApiResponse.status !== 405) {
-    const payload = await fastApiResponse.json().catch(() => null);
+    const rawBody = await fastApiResponse.text().catch(() => '');
+    let payload = null;
+    try {
+      payload = JSON.parse(rawBody);
+    } catch (e) {
+      // payload remains null
+    }
+
     if (!fastApiResponse.ok) {
-      throw new Error(`MinerU 提交失败: ${payload?.error || payload?.message || fastApiResponse.status}`);
+      const errorDetail = payload?.error || payload?.message || rawBody.slice(0, 500);
+      const configInfo = `backend=${effectiveBackend}, parse_method=${finalParseMethod}, zip=${responseFormatZip}`;
+      throw new Error(`MinerU 提交失败: ${fastApiResponse.status} | Endpoint: ${localEndpoint}/tasks | Body: ${errorDetail} | Config: ${configInfo}`);
     }
     mineruTaskId = payload?.task_id || payload?.taskid || payload?.taskId || '';
     if (!mineruTaskId) throw new Error('MinerU 未返回任务 id');
