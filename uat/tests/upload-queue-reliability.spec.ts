@@ -104,7 +104,7 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
     await fileInput.setInputFiles(round1);
 
     const appendBtn = page.locator('button:has-text("继续添加文件")');
-    const appendInput = page.locator('div[role="dialog"] input[type="file"]').first();
+    const appendInput = page.getByTestId('batch-append-file-input');
 
     console.log(`[${runId}] Round 2: 3 files (via Modal)`);
     await expect(appendBtn).toBeVisible({ timeout: 10000 });

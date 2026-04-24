@@ -604,7 +604,13 @@ export function BatchUploadModal() {
   if (!bp.uiOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="批量上传与处理"
+      data-testid="batch-upload-modal"
+    >
       <div className="bg-white rounded-xl shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
         <div className="flex items-center justify-between p-4 border-b border-gray-100 bg-gray-50/50">
           <div>
@@ -645,6 +651,7 @@ export function BatchUploadModal() {
               className="hidden"
               onChange={onAppendInputChange}
               accept=".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.jpg,.jpeg,.png"
+              data-testid="batch-append-file-input"
             />
             <button
               onClick={handleAppendFiles}
