@@ -2068,6 +2068,8 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
 
     const materialId = (req.body?.materialId || `mat-${Date.now()}`).toString();
     const fixedOriginalName = fixFilenameEncoding(req.file.originalname);
+    const requestId = String(req.headers['x-request-id'] || '').trim() || `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    res.setHeader('X-Request-Id', requestId);
     const extLower = (fixedOriginalName.split('.').pop() || '').toLowerCase();
     const supportedExts = new Set(['pdf', 'doc', 'docx', 'ppt', 'pptx', 'jpg', 'jpeg', 'png', 'md']);
     if (!supportedExts.has(extLower)) {
@@ -2077,6 +2079,22 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
         code: 'UNSUPPORTED_FORMAT',
       });
     }
+
+    const abortCtx = {
+      requestId,
+      materialId,
+      fileName: fixedOriginalName,
+      hasUploadedToMinio: false,
+      hasCreatedMaterial: false,
+      hasCreatedTask: false,
+      objectName: '',
+      taskId: '',
+    };
+    let aborted = false;
+    req.on('aborted', () => {
+      aborted = true;
+      console.warn('[upload-server] POST /tasks: Request aborted', JSON.stringify(abortCtx));
+    });
 
     // 0. 幂等检查：防止同一素材重复创建活跃任务
     try {
@@ -2106,14 +2124,19 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       console.warn(`[upload-server] /tasks: 幂等检查查询失败: ${e.message}`);
       // 容错处理：查询失败时暂不拦截，继续创建
     }
+    if (aborted) return;
     const taskId = `task-${Date.now()}`;
+    abortCtx.taskId = taskId;
     
     // 1. 上传文件到 MinIO
     const bucket = getMinioBucket();
     // 统一 objectName 命名规则：originals/{materialId}/source.{ext} (Requirement 6)
     const ext = extLower || 'bin';
     const objectName = `originals/${materialId}/source.${ext}`;
+    abortCtx.objectName = objectName;
     await streamUploadToMinIO(req.file, bucket, objectName, req.file.mimetype);
+    abortCtx.hasUploadedToMinio = true;
+    if (aborted) return;
 
     // 2. 创建或更新 material
     let existingMaterial = null;
@@ -2158,6 +2181,8 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       body: dbMatBody
     });
     if (!dbMatResp.ok) throw new Error(`同步 Material 到 db-server 失败`);
+    abortCtx.hasCreatedMaterial = true;
+    if (aborted) return;
 
     // 3. 创建 ParseTask
     let mineruConfig = {};
@@ -2218,6 +2243,8 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       }
       throw new Error(`同步 ParseTask 到 db-server 失败: ${dbTaskResult?.error || 'unknown'}`);
     }
+    abortCtx.hasCreatedTask = true;
+    if (aborted) return;
 
     // 生成预签名 URL 供前端使用 (Requirement 5)
     let presignedUrl = '';

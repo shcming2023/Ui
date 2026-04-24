@@ -198,7 +198,17 @@ export function BatchProcessingController() {
     if (!running || paused || working) return;
 
     if (!nextPending) {
-      if (wasRunningRef.current) toast.success('批量处理队列已完成');
+      if (wasRunningRef.current) {
+        const total = items.length;
+        const succeeded = items.filter((i) => i.status === 'completed').length;
+        const failed = items.filter((i) => i.status === 'error').length;
+        const skipped = items.filter((i) => i.status === 'skipped').length;
+        if (failed > 0) {
+          toast.warning(`批量处理已结束：成功 ${succeeded}，失败 ${failed}${skipped > 0 ? `，跳过 ${skipped}` : ''}`);
+        } else {
+          toast.success(`批量处理队列已完成：成功 ${succeeded}${skipped > 0 ? `，跳过 ${skipped}` : ''}`);
+        }
+      }
       wasRunningRef.current = false;
       dispatch({ type: 'BATCH_SET_RUNNING', payload: { running: false } });
       dispatch({ type: 'BATCH_SET_PAUSED', payload: { paused: false } });
@@ -252,7 +262,9 @@ export function BatchProcessingController() {
         }
 
         const uploadResult = await uploadRes.json();
+        const taskId = String(uploadResult?.taskId || '').trim();
         const objectName = String(uploadResult?.objectName || '').trim();
+        if (!taskId) throw new Error('后端未返回 taskId（任务未确认创建）');
         if (!objectName) {
           throw new Error('上传成功但未获得 objectName（未写入 MinIO）。后端队列只能处理 MinIO 文件，请检查存储后端配置。');
         }
@@ -288,21 +300,78 @@ export function BatchProcessingController() {
           },
         });
 
-        const taskId = String(uploadResult?.taskId || '').trim();
         updateItem(item.id, {
           status: 'completed',
           progress: 100,
-          message: taskId ? `上传成功（${taskId}）` : '上传成功',
+          message: `上传成功（${taskId}）`,
         });
         batchRemoveFile(item.id);
         toast.success('上传成功');
       } catch (error) {
         const raw = error instanceof Error ? error.message : String(error);
-        const msg = raw.includes('请求超时') || raw.includes('timed out') || raw.includes('Timeout')
-          ? `上传/提交超时：${raw}`
-          : `上传/提交失败：${raw}`;
+        const lowered = raw.toLowerCase();
+        const classify = () => {
+          if (raw.includes('UNSUPPORTED_FORMAT') || raw.includes('不支持的文件格式')) return `不支持的文件格式：${raw}`;
+          if (raw.includes('Request aborted') || lowered.includes('request aborted') || lowered.includes('aborted')) return `请求中断（Request aborted）：${raw}`;
+          if (raw.includes('请求超时') || lowered.includes('timed out') || lowered.includes('timeout')) return `请求超时：${raw}`;
+          if (lowered.includes('network') || lowered.includes('failed to fetch')) return `网络错误：${raw}`;
+          return `上传失败：${raw}`;
+        };
+
+        const msg = classify();
+
+        const canReconcile = materialId != null
+          && (msg.startsWith('请求中断') || msg.startsWith('请求超时') || msg.startsWith('网络错误'));
+        if (canReconcile) {
+          try {
+            const [taskResp, matResp] = await Promise.all([
+              fetchWithTimeout('/__proxy/db/tasks', { timeoutMs: 5000 }).catch(() => null),
+              fetchWithTimeout(`/__proxy/db/materials/${encodeURIComponent(String(materialId))}`, { timeoutMs: 5000 }).catch(() => null),
+            ]);
+            if (taskResp?.ok && matResp?.ok) {
+              const tasks = await taskResp.json().catch(() => null);
+              const material = await matResp.json().catch(() => null);
+              const related = Array.isArray(tasks)
+                ? tasks.find((t) => String(t?.materialId) === String(materialId))
+                : null;
+              const objectName = String(material?.metadata?.objectName || '').trim();
+              if (related && objectName) {
+                const mIdNum = Number(String(materialId));
+                const payload = {
+                  id: mIdNum,
+                  title: String(material?.title || '').trim() || String(material?.fileName || '').replace(/\.[^/.]+$/, ''),
+                  type: String(material?.type || 'FILE'),
+                  size: `${((Number(material?.fileSize) || 0) / 1024 / 1024).toFixed(1)} MB`,
+                  sizeBytes: Number(material?.fileSize) || 0,
+                  uploadTime: '刚刚',
+                  uploadTimestamp: Date.now(),
+                  status: material?.status || 'processing',
+                  mineruStatus: material?.mineruStatus || 'pending',
+                  aiStatus: material?.aiStatus || 'pending',
+                  tags: Array.isArray(material?.tags) ? material.tags : [],
+                  metadata: material?.metadata || { objectName },
+                  uploader: '当前用户',
+                };
+                const exists = state.materials.some((m) => m.id === mIdNum);
+                if (exists) {
+                  dispatch({ type: 'UPDATE_MATERIAL', payload: { id: mIdNum, updates: payload } });
+                } else {
+                  dispatch({ type: 'ADD_MATERIAL', payload });
+                }
+                updateItem(item.id, {
+                  status: 'completed',
+                  progress: 100,
+                  message: `上传已创建任务（响应中断后自动对账）`,
+                });
+                batchRemoveFile(item.id);
+                return;
+              }
+            }
+          } catch {
+          }
+        }
+
         updateItem(item.id, { status: 'error', message: msg });
-        void materialId;
       }
     };
 
@@ -310,7 +379,7 @@ export function BatchProcessingController() {
     processOne(nextPending, file).finally(() => {
       setWorking(false);
     });
-  }, [dispatch, nextPending, paused, running, working]);
+  }, [dispatch, items, nextPending, paused, running, working]);
 
   return null;
 }
