@@ -92,9 +92,9 @@ test.describe('【P0】上传队列可靠性与 aborted 可观测', () => {
 
     const input = page.locator('input[type="file"]').first();
     // --- 三轮提交，总计 10 个文件 ---
-    const round1 = [allFiles[0], allFiles[1], allFiles[2], allFiles[3]];
-    const round2 = [allFiles[4], allFiles[5], allFiles[6]];
-    const round3 = [allFiles[7], allFiles[8], allFiles[9]];
+    const round1 = selected.slice(0, 4);
+    const round2 = selected.slice(4, 7);
+    const round3 = selected.slice(7, 10);
 
     const uploadBtn = page.locator('button:has-text("上传文件")');
     const fileInput = page.locator('input[type="file"]');
