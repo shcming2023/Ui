@@ -63,8 +63,8 @@ test.describe('Cross-Page Consistency (ParseTask Truth)', () => {
     // 检查状态徽章（多个可能的选择器）
     const detailStatus = page.locator('.rounded-full').first();
     await expect(detailStatus).toBeVisible({ timeout: 15000 });
-    // 资产详情页应该显示任务卡片
-    await expect(page.getByText(`Task ID: ${taskId}`)).toBeVisible();
+    // 资产详情页应该显示任务卡片（Task ID 单独一行，不带前缀）
+    await expect(page.getByText(taskId)).toBeVisible();
 
     // C. 任务列表检查
     await page.goto(`${BASE_URL}/cms/tasks`);
