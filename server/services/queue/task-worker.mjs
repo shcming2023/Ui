@@ -260,6 +260,19 @@ export class ParseTaskWorker {
             updateProgress: async (updateInfo) => {
               const eventName = updateInfo.stage === 'store' ? 'stage-changed' : 'progress-update';
               await this.transition(task, updateInfo, eventName);
+              
+              // P0 Task 3: 同步 Material 状态
+              if (task.materialId && (updateInfo.stage || updateInfo.message || updateInfo.metadata)) {
+                await this.updateMaterialWithRetry(task.materialId, {
+                  metadata: {
+                    ...(materialInfo.metadata || {}),
+                    ...(updateInfo.metadata || {}), // 透传 MinerU taskId, startedAt 等
+                    processingStage: updateInfo.stage || task.stage,
+                    processingMsg: updateInfo.message || task.message,
+                    processingUpdatedAt: new Date().toISOString()
+                  }
+                }, { enqueueOnFailure: true });
+              }
             }
           });
           markdownObjectName = mineruResult.objectName;

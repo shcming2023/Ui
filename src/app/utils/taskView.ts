@@ -148,7 +148,9 @@ export function deriveMaterialTaskView(
     latestTask: currentTask,
     taskState: currentTask?.state,
     bucket,
-    displayStatus: STATE_LABELS[currentTask?.state || ''] || (currentTask ? '未知' : '待处理'),
+    displayStatus: currentTask?.stage === 'mineru-queued' ? 'MinerU 排队中' :
+                   currentTask?.stage === 'mineru-processing' ? 'MinerU 正在解析' :
+                   (STATE_LABELS[currentTask?.state || ''] || (currentTask ? '未知' : '待处理')),
     failureMessage: currentTask?.errorMessage || currentTask?.message,
     taskUrl: currentTask ? `/tasks/${currentTask.id}` : undefined,
     hasStateDrift: false,

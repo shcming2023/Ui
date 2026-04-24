@@ -730,6 +730,34 @@ export function TaskDetailPage() {
               </dl>
             </div>
 
+            {/* MinerU 解析状态 */}
+            {!!task.metadata?.mineruTaskId && (
+              <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
+                <h2 className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-2">
+                  <LayoutDashboard className="w-4 h-4 text-blue-500" />
+                  MinerU 状态详情
+                </h2>
+                <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">MinerU Task ID</dt>
+                    <dd className="text-slate-800 font-mono text-xs break-all">{String(task.metadata.mineruTaskId)}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">当前排队</dt>
+                    <dd className="text-slate-800">{task.metadata.mineruQueuedAhead !== undefined ? `${String(task.metadata.mineruQueuedAhead)} (前方)` : '—'}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">开始解析时间</dt>
+                    <dd className="text-slate-800">{task.metadata.mineruStartedAt ? new Date(String(task.metadata.mineruStartedAt)).toLocaleString() : '—'}</dd>
+                  </div>
+                  <div className="flex justify-between">
+                    <dt className="text-slate-400">最近状态更新</dt>
+                    <dd className="text-slate-800">{task.metadata.mineruLastStatusAt ? new Date(String(task.metadata.mineruLastStatusAt)).toLocaleString() : '—'}</dd>
+                  </div>
+                </dl>
+              </div>
+            )}
+
             {/* AI Job */}
             <div className="bg-white border border-slate-200 rounded-lg shadow-sm p-5">
               <h2 className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-2">

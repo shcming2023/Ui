@@ -103,16 +103,53 @@ export async function processWithLocalMinerU({ task, material, fileStream, fileN
     mineruTaskId = payload?.task_id || payload?.taskid || payload?.taskId || '';
     if (!mineruTaskId) throw new Error('MinerU 未返回任务 id');
 
-    await updateProgress({ progress: 20, message: `任务已提交，内部ID: ${mineruTaskId}` });
+    // P0 Task 1: 拿到 mineruTaskId 后立即更新 metadata
+    await updateProgress({
+      progress: 20,
+      message: `任务已提交，内部ID: ${mineruTaskId}`,
+      metadata: {
+        ...(task.metadata || {}),
+        mineruTaskId,
+        mineruStatus: 'submitted',
+        mineruSubmittedAt: new Date().toISOString(),
+      }
+    });
 
-    // 3. Poll
+    // 3. Poll (P0 Task 2: 区分 queued 与 processing)
     await waitMinerUTask(localEndpoint, mineruTaskId, timeoutMs, async (statusPayload) => {
       const status = String(statusPayload?.status || '').toLowerCase();
-      const queued = statusPayload?.queued_ahead || statusPayload?.queue_ahead || 0;
-      let msg = `处理中 (${status})...`;
-      if (status === 'pending' || status === 'queued') msg = `排队中 (前方 ${queued} 个任务)`;
-      else if (status === 'processing') msg = '正在执行 OCR 与解析...';
-      await updateProgress({ progress: 50, message: msg });
+      const queuedAhead = statusPayload?.queued_ahead ?? statusPayload?.queue_ahead ?? 0;
+      const startedAt = statusPayload?.started_at || null;
+
+      let stage = 'mineru-processing';
+      let msg = 'MinerU 正在解析';
+      let progress = 50;
+      let mineruStatus = 'processing';
+
+      const isDone = ['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(status);
+      if (isDone) return; // waitMinerUTask will handle done states
+
+      if (status === 'pending' || status === 'queued' || (!startedAt && status !== 'processing') || queuedAhead > 0) {
+        stage = 'mineru-queued';
+        msg = `MinerU 排队中 (前方 ${queuedAhead} 个任务)`;
+        progress = 20;
+        mineruStatus = 'queued';
+      }
+
+      await updateProgress({
+        stage,
+        state: 'running',
+        progress,
+        message: msg,
+        metadata: {
+          ...(task.metadata || {}),
+          mineruTaskId,
+          mineruStatus,
+          mineruQueuedAhead: queuedAhead,
+          mineruStartedAt: startedAt,
+          mineruLastStatusAt: new Date().toISOString()
+        }
+      });
     });
 
     await updateProgress({ progress: 80, message: '解析完成，提取结果...' });
