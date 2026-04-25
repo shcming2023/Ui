@@ -2212,6 +2212,26 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       material
     };
 
+    const mineruExecutionProfile = {
+      backend: optionsSnapshot.backend,
+      effectiveBackend: optionsSnapshot.backend,
+      parseMethod: optionsSnapshot.parseMethod || 'auto',
+      enableOcr: optionsSnapshot.enableOcr !== false && optionsSnapshot.enableOcr !== 'false',
+      enableFormula: optionsSnapshot.enableFormula !== false && optionsSnapshot.enableFormula !== 'false',
+      enableTable: optionsSnapshot.enableTable !== false && optionsSnapshot.enableTable !== 'false',
+      ocrLanguage: optionsSnapshot.ocrLanguage,
+      maxPages: optionsSnapshot.maxPages,
+      localEndpoint: optionsSnapshot.localEndpoint,
+      returnMd: optionsSnapshot.returnMd ?? true,
+      returnMiddleJson: optionsSnapshot.returnMiddleJson ?? true,
+      returnModelOutput: optionsSnapshot.returnModelOutput ?? true,
+      returnContentList: optionsSnapshot.returnContentList ?? true,
+      returnImages: optionsSnapshot.returnImages ?? true,
+      returnOriginalFile: optionsSnapshot.returnOriginalFile ?? true,
+      fileSize: req.file.size,
+      fileName: fixedOriginalName
+    };
+
     const parseTask = {
       id: taskId,
       materialId: materialId,
@@ -2221,6 +2241,7 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
       progress: 0,
       message: '任务已创建待处理',
       optionsSnapshot: optionsSnapshot,
+      metadata: { mineruExecutionProfile },
       createdAt: new Date().toISOString()
     };
     

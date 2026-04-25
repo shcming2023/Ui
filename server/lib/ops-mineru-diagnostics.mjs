@@ -64,7 +64,7 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
           const targetTask = tasks.find(t => t.id === targetTaskId);
           if (targetTask) {
             const minObservedAt = targetTask.metadata?.mineruStartedAt || targetTask.updatedAt || targetTask.createdAt;
-            result.logObservation = await parseLatestMineruProgress(minObservedAt, targetTask.metadata?.mineruObservedProgress).catch(() => null);
+            result.logObservation = await parseLatestMineruProgress(minObservedAt, targetTask.metadata?.mineruObservedProgress, targetTask.metadata?.mineruExecutionProfile).catch(() => null);
           }
         }
         
@@ -131,7 +131,7 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
         result.diagnosis.safeToAutoRecover = false;
         
         const minObservedAt = actualMineruTaskStartedAt || actualProcessingLuceonTaskInfo.metadata?.mineruStartedAt || actualProcessingLuceonTaskInfo.updatedAt || actualProcessingLuceonTaskInfo.createdAt;
-        result.logObservation = await parseLatestMineruProgress(minObservedAt, actualProcessingLuceonTaskInfo.metadata?.mineruObservedProgress).catch(() => null);
+        result.logObservation = await parseLatestMineruProgress(minObservedAt, actualProcessingLuceonTaskInfo.metadata?.mineruObservedProgress, actualProcessingLuceonTaskInfo.metadata?.mineruExecutionProfile).catch(() => null);
       } else {
         result.diagnosis.status = 'busy';
         result.diagnosis.kind = 'luceon-processing';

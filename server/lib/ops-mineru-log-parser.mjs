@@ -223,7 +223,7 @@ export function determineActivityLevel(signalSummary, previousObservation, curre
  * @param {object|null} previousObservation - 上次观测结果（用于判断进度变化和活性裁决）
  * @returns {Promise<object|null>} 结构化观测结果，无日志或全部过期返回 null
  */
-export async function parseLatestMineruProgress(minObservedAt, previousObservation = null) {
+export async function parseLatestMineruProgress(minObservedAt, previousObservation = null, executionProfile = null) {
   const logPaths = [
     process.env.MINERU_ERR_LOG_PATH || '/Users/concm/ops/logs/mineru-api.err.log',
     process.env.MINERU_LOG_PATH || '/Users/concm/ops/logs/mineru-api.log',
@@ -313,6 +313,81 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
 
       if (stats.mtimeMs > latestMtime) {
         latestMtime = stats.mtimeMs;
+
+        let backendProfile = executionProfile?.backend || 'pipeline';
+        if (executionProfile?.effectiveBackend) backendProfile = executionProfile.effectiveBackend;
+
+        let document = {
+          totalPages: null,
+          currentPages: null
+        };
+        if (latestWindow && latestWindow.pageTotal) {
+          document.totalPages = latestWindow.pageTotal;
+        } else if (executionProfile?.maxPages) {
+          document.totalPages = executionProfile.maxPages;
+        }
+
+        let unitType = 'unknown-units';
+        let normalizedPhase = latestProgress?.phase || '';
+
+        if (backendProfile.includes('hybrid')) {
+          if (normalizedPhase.toLowerCase().includes('predict')) {
+             if (latestWindow && latestProgress?.total === latestWindow.windowTotal) {
+                 unitType = 'window-pages';
+             } else if (latestWindow && latestProgress?.total === (latestWindow.pageEnd - latestWindow.pageStart + 1)) {
+                 unitType = 'document-pages';
+             } else if (document.totalPages && latestProgress?.total === document.totalPages) {
+                 unitType = 'document-pages';
+             } else if (latestProgress?.total > 100 && (!document.totalPages || latestProgress?.total > document.totalPages)) {
+                 unitType = 'model-units';
+             } else {
+                 unitType = 'model-units';
+             }
+          } else if (normalizedPhase === 'OCR-rec' || normalizedPhase.includes('OCR')) {
+             unitType = 'ocr-recognition-blocks';
+          }
+        } else {
+          // pipeline
+          if (normalizedPhase === 'Processing pages' || normalizedPhase === 'Layout') {
+              unitType = 'document-pages';
+          } else if (normalizedPhase.includes('Table-ocr') || normalizedPhase === 'Table') {
+              unitType = 'table-regions';
+          } else if (normalizedPhase.includes('OCR') || normalizedPhase === 'OCR-rec') {
+              unitType = 'ocr-recognition-blocks';
+          } else if (normalizedPhase === 'Seal') {
+              unitType = 'seal-units';
+          }
+        }
+
+        let stage = null;
+        if (latestProgress) {
+            stage = {
+               rawPhase: latestProgress.phase,
+               normalizedPhase: normalizedPhase,
+               unitType: unitType,
+               current: latestProgress.current,
+               total: latestProgress.total,
+               percent: latestProgress.percent
+            };
+        }
+
+        let signals = {
+            hasBusinessSignal: businessLogCount > 0 || progressCount > 0 || stageChangeCount > 0,
+            hasApiNoiseOnly: apiNoiseCount > 0 && progressCount === 0 && businessLogCount === 0 && errorCount === 0,
+            hasErrorSignal: errorCount > 0
+        };
+
+        let windowObj = null;
+        if (latestWindow) {
+           windowObj = {
+               index: latestWindow.windowCurrent,
+               total: latestWindow.windowTotal,
+               pageStart: latestWindow.pageStart,
+               pageEnd: latestWindow.pageEnd,
+               pageTotal: latestWindow.pageTotal
+           };
+        }
+
         bestResult = {
           source: 'mineru-log',
           // tqdm 兼容字段
@@ -328,7 +403,13 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
           latestError,
           businessSignals: businessSignals.slice(-5), // 保留最后 5 条业务信号
           logFileUpdatedAt: new Date(stats.mtimeMs).toISOString(),
-          contextTime: latestProgress?.contextTime || (lastBusinessSignalTime ? new Date(lastBusinessSignalTime).toISOString() : null)
+          contextTime: latestProgress?.contextTime || (lastBusinessSignalTime ? new Date(lastBusinessSignalTime).toISOString() : null),
+          // Semantic Fields
+          backendProfile,
+          document,
+          window: windowObj,
+          stage,
+          signals
         };
       }
     } catch (_e) {

@@ -136,7 +136,7 @@ export class ParseTaskWorker {
 
       const targetTask = processingTasks[0];
       const minObservedAt = targetTask.metadata?.mineruStartedAt || targetTask.updatedAt || targetTask.createdAt;
-      const logProgress = await parseLatestMineruProgress(minObservedAt, targetTask.metadata?.mineruObservedProgress);
+      const logProgress = await parseLatestMineruProgress(minObservedAt, targetTask.metadata?.mineruObservedProgress, targetTask.metadata?.mineruExecutionProfile);
       if (!logProgress) return;
 
       const health = logProgress.activityLevel || 'no-business-signal';
@@ -935,6 +935,7 @@ export class ParseTaskWorker {
           message: isMarkdown ? 'Markdown 文件无需解析，正在准备 AI 任务' : 'MinerU 解析完成，产物已落库，等待 AI 元数据识别',
           metadata: {
             ...(task.metadata || {}),
+            mineruStatus: 'completed',
             markdownObjectName,
             mineruTaskId,
             parsedPrefix,
@@ -1001,6 +1002,10 @@ export class ParseTaskWorker {
           state: 'ai-pending',
           progress: 100,
           message: '[worker skeleton] 解析完成（模拟），等待 AI 元数据识别',
+          metadata: {
+            ...(task.metadata || {}),
+            mineruStatus: 'completed'
+          },
           completedAt: new Date().toISOString()
         }, 'worker-completed');
 
