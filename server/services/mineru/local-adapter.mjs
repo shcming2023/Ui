@@ -6,6 +6,38 @@
 
 import JSZip from 'jszip';
 
+/**
+ * MinerU 本地等待超时错误。
+ * 表示 Luceon 本地轮询 MinerU 超时，但并不代表 MinerU 任务本身失败。
+ *
+ * @property {string} mineruTaskId - 对应的 MinerU 内部任务 ID
+ * @property {string} lastKnownStatus - 超时前最后一次查询到的 MinerU 状态
+ */
+export class MineruTimeoutError extends Error {
+  constructor(mineruTaskId, lastKnownStatus, timeoutMs) {
+    super(`本地等待 MinerU 超时 (${Math.round(timeoutMs / 1000)}s)，但 MinerU 任务 ${mineruTaskId} 最后状态为 ${lastKnownStatus}，不代表业务失败`);
+    this.name = 'MineruTimeoutError';
+    this.mineruTaskId = mineruTaskId;
+    this.lastKnownStatus = lastKnownStatus;
+  }
+}
+
+/**
+ * MinerU 仍在处理错误。
+ * 表示 Luceon 等待超时后确认 MinerU 仍在 queued/processing，任务应保持 running 而非 failed。
+ *
+ * @property {string} mineruTaskId - 对应的 MinerU 内部任务 ID
+ * @property {string} mineruStatus - MinerU 当前确认的状态（queued/processing）
+ */
+export class MineruStillProcessingError extends Error {
+  constructor(mineruTaskId, mineruStatus) {
+    super(`MinerU 任务 ${mineruTaskId} 仍在 ${mineruStatus}，Luceon 本地等待已超时但任务未失败`);
+    this.name = 'MineruStillProcessingError';
+    this.mineruTaskId = mineruTaskId;
+    this.mineruStatus = mineruStatus;
+  }
+}
+
 export async function processWithLocalMinerU({ task, material, fileStream, fileName, mimeType, timeoutMs, minioContext, updateProgress }) {
   const options = task.optionsSnapshot || {};
   let localEndpoint = options.localEndpoint;
@@ -122,41 +154,74 @@ export async function processWithLocalMinerU({ task, material, fileStream, fileN
     });
 
     // 3. Poll (P0 Task 2: 区分 queued 与 processing)
-    await waitMinerUTask(localEndpoint, mineruTaskId, timeoutMs, async (statusPayload) => {
-      const status = String(statusPayload?.status || '').toLowerCase();
-      const queuedAhead = statusPayload?.queued_ahead ?? statusPayload?.queue_ahead ?? 0;
-      const startedAt = statusPayload?.started_at || null;
+    // 如果本地超时但 MinerU 仍在处理，抛出 MineruStillProcessingError 由 task-worker 裁决
+    try {
+      await waitMinerUTask(localEndpoint, mineruTaskId, timeoutMs, async (statusPayload) => {
+        const status = String(statusPayload?.status || '').toLowerCase();
+        const queuedAhead = statusPayload?.queued_ahead ?? statusPayload?.queue_ahead ?? 0;
+        const startedAt = statusPayload?.started_at || null;
 
-      let stage = 'mineru-processing';
-      let msg = 'MinerU 正在解析';
-      let progress = 50;
-      let mineruStatus = 'processing';
+        let stage = 'mineru-processing';
+        let msg = 'MinerU 正在解析';
+        let progress = 50;
+        let mineruStatus = 'processing';
 
-      const isDone = ['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(status);
-      if (isDone) return; // waitMinerUTask will handle done states
+        const isDone = ['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(status);
+        if (isDone) return; // waitMinerUTask will handle done states
 
-      if (status === 'pending' || status === 'queued' || (!startedAt && status !== 'processing') || queuedAhead > 0) {
-        stage = 'mineru-queued';
-        msg = `MinerU 排队中 (前方 ${queuedAhead} 个任务)`;
-        progress = 20;
-        mineruStatus = 'queued';
-      }
-
-      await updateProgress({
-        stage,
-        state: 'running',
-        progress,
-        message: msg,
-        metadata: {
-          ...(task.metadata || {}),
-          mineruTaskId,
-          mineruStatus,
-          mineruQueuedAhead: queuedAhead,
-          mineruStartedAt: startedAt,
-          mineruLastStatusAt: new Date().toISOString()
+        if (status === 'pending' || status === 'queued' || (!startedAt && status !== 'processing') || queuedAhead > 0) {
+          stage = 'mineru-queued';
+          msg = `MinerU 排队中 (前方 ${queuedAhead} 个任务)`;
+          progress = 20;
+          mineruStatus = 'queued';
         }
+
+        await updateProgress({
+          stage,
+          state: 'running',
+          progress,
+          message: msg,
+          metadata: {
+            ...(task.metadata || {}),
+            mineruTaskId,
+            mineruStatus,
+            mineruQueuedAhead: queuedAhead,
+            mineruStartedAt: startedAt,
+            mineruLastStatusAt: new Date().toISOString()
+          }
+        });
       });
-    });
+    } catch (pollErr) {
+      if (pollErr instanceof MineruTimeoutError) {
+        // 本地等待超时：查询一次 MinerU 确认最新状态
+        try {
+          const checkRes = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(mineruTaskId)}`, { signal: AbortSignal.timeout(5000) });
+          if (checkRes.ok) {
+            const checkData = await checkRes.json();
+            const actualStatus = String(checkData?.status || '').toLowerCase();
+            if (['queued', 'pending', 'processing', 'running'].includes(actualStatus)) {
+              throw new MineruStillProcessingError(mineruTaskId, actualStatus);
+            }
+            if (['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(actualStatus)) {
+              // MinerU 已经完成了，继续执行结果拉取
+              // 不抛异常，跳出 catch 继续后续逻辑
+            } else {
+              // MinerU 返回了明确失败
+              throw new Error(`MinerU API 明确返回 ${actualStatus}: ${checkData?.error || checkData?.message || 'MinerU 任务失败'}`);
+            }
+          } else {
+            throw new MineruStillProcessingError(mineruTaskId, pollErr.lastKnownStatus || 'unknown');
+          }
+        } catch (confirmErr) {
+          if (confirmErr instanceof MineruStillProcessingError) throw confirmErr;
+          if (confirmErr.message?.includes('MinerU API 明确返回')) throw confirmErr;
+          // 网络不可达等：保守处理，保持 running
+          throw new MineruStillProcessingError(mineruTaskId, pollErr.lastKnownStatus || 'unknown');
+        }
+      } else {
+        throw pollErr;
+      }
+    }
 
     await updateProgress({ progress: 80, message: '解析完成，提取结果...' });
     const resultRaw = await fetchMinerUResultRaw(localEndpoint, mineruTaskId, timeoutMs);
@@ -566,6 +631,7 @@ function createMultipartStream({ boundary, fields, fileFieldName, fileName, mime
 
 async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress) {
   const deadline = Date.now() + timeoutMs;
+  let lastKnownStatus = 'unknown';
   while (Date.now() < deadline) {
     const response = await fetch(`${localEndpoint}/tasks/${encodeURIComponent(taskId)}`, { signal: AbortSignal.timeout(10000) });
     const payload = await response.json();
@@ -574,12 +640,13 @@ async function waitMinerUTask(localEndpoint, taskId, timeoutMs, onProgress) {
     if (onProgress) await onProgress(payload);
     
     const status = String(payload?.status || payload?.state || payload?.task_status || payload?.data?.status || payload?.data?.state).toLowerCase();
+    lastKnownStatus = status;
     if (['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(status)) return payload;
     if (['failed', 'error', 'failure', 'canceled', 'cancelled'].includes(status)) throw new Error(payload?.error || payload?.message || '任务执行失败');
     
     await new Promise(r => setTimeout(r, 1500));
   }
-  throw new Error(`超时未完成 (等待超过 ${Math.round(timeoutMs/1000)}s)`);
+  throw new MineruTimeoutError(taskId, lastKnownStatus, timeoutMs);
 }
 
 async function fetchMinerUResult(localEndpoint, taskId, timeoutMs) {

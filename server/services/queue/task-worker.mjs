@@ -10,7 +10,7 @@
 
 import { getAllTasks, updateTask, updateMaterial } from '../tasks/task-client.mjs';
 import { logTaskEvent } from '../logging/task-events.mjs';
-import { processWithLocalMinerU, resumeWithLocalMinerU } from '../mineru/local-adapter.mjs';
+import { processWithLocalMinerU, resumeWithLocalMinerU, MineruStillProcessingError } from '../mineru/local-adapter.mjs';
 import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
 import { parseLatestMineruProgress } from '../../lib/ops-mineru-log-parser.mjs';
 
@@ -284,6 +284,9 @@ export class ParseTaskWorker {
       if (recovered > 0) {
         console.log(`[task-worker] recovery scan: reset ${recovered} running/result-store tasks to pending`);
       }
+
+      // P0: 纠偏错误 failed 的任务（有 mineruTaskId 但 Luceon 误判 failed）
+      await this.recoverMisjudgedFailedTasks(tasks);
     } catch (err) {
       console.error(`[task-worker] runRecoveryScan error: ${err.message}`);
     }
@@ -316,6 +319,145 @@ export class ParseTaskWorker {
         message: '日常扫描发现运行超时，已重置为 pending',
         payload: { previousState: task.state, previousUpdatedAt: task.updatedAt, timeoutMs },
       });
+    }
+  }
+
+  /**
+   * P0 纠偏：扫描 failed 状态的任务，若含 mineruTaskId 则查询 MinerU API 裁决。
+   * - MinerU queued/processing：纠正回 running，由后台轮询接管，不重新提交。
+   * - MinerU completed 且 result 可取：纠正并拉取结果入库，进入后续 AI 流程。
+   * - MinerU failed/error/canceled：保持 failed，补充 MinerU 明确失败证据。
+   * - MinerU 404 / 不可达：保持 failed，记录不可确认原因。
+   *
+   * @param {Array} tasks - 当前所有任务列表
+   * @returns {Promise<void>}
+   */
+  async recoverMisjudgedFailedTasks(tasks) {
+    const failedWithMineruId = tasks.filter(t =>
+      t.state === 'failed' && t.metadata?.mineruTaskId && t.engine === 'local-mineru'
+    );
+    if (failedWithMineruId.length === 0) return;
+
+    for (const task of failedWithMineruId) {
+      if (processingMap.has(task.id)) continue;
+      const mineruTaskId = task.metadata.mineruTaskId;
+      const localEndpointRaw = task.optionsSnapshot?.localEndpoint;
+      if (!localEndpointRaw) continue;
+
+      let localEndpoint = localEndpointRaw;
+      if (localEndpoint.includes('localhost') || localEndpoint.includes('127.0.0.1')) {
+        localEndpoint = localEndpoint.replace(/localhost|127\.0\.0\.1/g, 'host.docker.internal');
+      }
+      localEndpoint = localEndpoint.replace(/\/+$/, '');
+
+      let mineruStatus = null;
+      let mineruData = null;
+
+      try {
+        const tRes = await fetch(`${localEndpoint}/tasks/${mineruTaskId}`, { signal: AbortSignal.timeout(5000) });
+        if (tRes.ok) {
+          mineruData = await tRes.json();
+          mineruStatus = String(mineruData.status || mineruData.state || '').toLowerCase();
+        } else if (tRes.status === 404) {
+          mineruStatus = 'not_found';
+        }
+      } catch (e) {
+        console.warn(`[task-worker] recoverMisjudgedFailed: 查询 MinerU ${mineruTaskId} 失败: ${e.message}`);
+        continue; // 网络不可达则跳过，不做任何判定
+      }
+
+      if (!mineruStatus) continue;
+
+      const isProcessing = ['queued', 'pending', 'processing', 'running'].includes(mineruStatus);
+      const isCompleted = ['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(mineruStatus);
+      const isFailed = ['failed', 'error', 'failure', 'canceled', 'cancelled'].includes(mineruStatus);
+
+      if (isProcessing) {
+        // 纠正回 running：MinerU 仍在工作，由后台接管
+        console.log(`[task-worker] recoverMisjudgedFailed: Task ${task.id} 纠偏：MinerU ${mineruTaskId} 仍在 ${mineruStatus}`);
+        await this.updateTaskWithRetry(task.id, {
+          state: 'running',
+          stage: mineruStatus === 'queued' || mineruStatus === 'pending' ? 'mineru-queued' : 'mineru-processing',
+          message: `纠偏恢复：Luceon 误判 failed，但 MinerU 仍在 ${mineruStatus}，已纠正为 running`,
+          metadata: {
+            ...(task.metadata || {}),
+            mineruStatus,
+            recoveredFromMisjudgedFailed: true,
+            recoveredAt: new Date().toISOString()
+          }
+        }, { enqueueOnFailure: true });
+        await logTaskEvent({
+          taskId: task.id, taskType: 'parse', level: 'warn',
+          event: 'misjudged-failed-corrected',
+          message: `Luceon 误判 failed 已纠正：MinerU ${mineruTaskId} 实际状态为 ${mineruStatus}`,
+          payload: { mineruTaskId, mineruStatus }
+        });
+        // 启动后台接管
+        this.resumeMineruTask(task, mineruTaskId).catch(err =>
+          console.error(`[task-worker] Error resuming misjudged task ${task.id}:`, err)
+        );
+
+      } else if (isCompleted) {
+        // MinerU 已完成但 Luceon 标了 failed：拉取结果入库
+        console.log(`[task-worker] recoverMisjudgedFailed: Task ${task.id} 纠偏：MinerU ${mineruTaskId} 已完成，尝试拉取结果`);
+        await this.updateTaskWithRetry(task.id, {
+          state: 'running',
+          stage: 'result-fetching',
+          message: `纠偏恢复：MinerU 已完成，正在拉取结果入库`,
+          metadata: {
+            ...(task.metadata || {}),
+            mineruStatus: 'completed',
+            recoveredFromMisjudgedFailed: true,
+            recoveredAt: new Date().toISOString()
+          }
+        }, { enqueueOnFailure: true });
+        await logTaskEvent({
+          taskId: task.id, taskType: 'parse', level: 'warn',
+          event: 'misjudged-failed-corrected',
+          message: `Luceon 误判 failed 已纠正：MinerU ${mineruTaskId} 实际已完成，开始拉取结果`,
+          payload: { mineruTaskId, mineruStatus: 'completed' }
+        });
+        this.resumeMineruTask(task, mineruTaskId).catch(err =>
+          console.error(`[task-worker] Error resuming completed misjudged task ${task.id}:`, err)
+        );
+
+      } else if (isFailed) {
+        // MinerU 也确认失败：保持 failed 但补充证据
+        const evidenceMsg = `MinerU API 明确返回 ${mineruStatus}: ${mineruData?.error || mineruData?.message || '无详细错误'}`;
+        if (!task.message?.includes('MinerU API 明确返回')) {
+          await this.updateTaskWithRetry(task.id, {
+            state: 'failed',
+            message: `[failed 已确认] ${evidenceMsg}`,
+            metadata: {
+              ...(task.metadata || {}),
+              mineruStatus,
+              failureEvidenceSource: 'MinerU API',
+              failureConfirmedAt: new Date().toISOString()
+            }
+          }, { enqueueOnFailure: true });
+          await logTaskEvent({
+            taskId: task.id, taskType: 'parse', level: 'info',
+            event: 'failed-confirmed-by-mineru',
+            message: evidenceMsg,
+            payload: { mineruTaskId, mineruStatus }
+          });
+        }
+
+      } else if (mineruStatus === 'not_found') {
+        // MinerU 404：任务记录已丢失，保持 failed
+        if (!task.message?.includes('MinerU 任务记录已丢失')) {
+          await this.updateTaskWithRetry(task.id, {
+            state: 'failed',
+            message: `[failed 已确认] MinerU 任务记录已丢失 (404)，需人工审计`,
+            metadata: {
+              ...(task.metadata || {}),
+              mineruStatus: 'not_found',
+              failureEvidenceSource: 'MinerU API 404',
+              failureConfirmedAt: new Date().toISOString()
+            }
+          }, { enqueueOnFailure: true });
+        }
+      }
     }
   }
 
@@ -518,6 +660,27 @@ export class ParseTaskWorker {
       }
 
     } catch (error) {
+      // P0: 区分 MineruStillProcessingError 与真正的业务失败
+      if (error instanceof MineruStillProcessingError || error?.name === 'MineruStillProcessingError') {
+        // MinerU 仍在 processing/queued：保持 running，不进入 failed
+        console.log(`[task-worker] Task ${task.id}: MinerU ${error.mineruTaskId} 仍在 ${error.mineruStatus}，保持 running 等待后续轮询接管`);
+        await this.transition(task, {
+          state: 'running',
+          stage: error.mineruStatus === 'queued' ? 'mineru-queued' : 'mineru-processing',
+          message: `本地等待超时但 MinerU 仍在 ${error.mineruStatus}，后台将继续观测`,
+          metadata: {
+            ...(task.metadata || {}),
+            mineruTaskId: error.mineruTaskId,
+            mineruStatus: error.mineruStatus,
+            mineruLastStatusAt: new Date().toISOString(),
+            localTimeoutOccurred: true,
+            localTimeoutAt: new Date().toISOString()
+          }
+        }, 'mineru-timeout-but-still-processing', 'warn');
+        // 不标记 material 失败
+        return;
+      }
+
       console.error(`[task-worker] Task ${task.id} failed: ${error.message}`);
       await this.transition(task, {
         state: 'failed',
