@@ -10,7 +10,7 @@
 
 import { getAllTasks, updateTask, updateMaterial } from '../tasks/task-client.mjs';
 import { logTaskEvent } from '../logging/task-events.mjs';
-import { processWithLocalMinerU } from '../mineru/local-adapter.mjs';
+import { processWithLocalMinerU, resumeWithLocalMinerU } from '../mineru/local-adapter.mjs';
 import { createAiMetadataJob } from '../ai/metadata-job-client.mjs';
 import { parseLatestMineruProgress } from '../../lib/ops-mineru-log-parser.mjs';
 
@@ -49,6 +49,7 @@ export class ParseTaskWorker {
     this.eventBus = options.eventBus || null;
     this.taskClient = options.taskClient || { getAllTasks, updateTask, updateMaterial };
     this.mineruProcessor = options.mineruProcessor || processWithLocalMinerU;
+    this.mineruResumer = options.mineruResumer || resumeWithLocalMinerU;
     this.pendingTaskPatches = new Map();
     this.pendingMaterialPatches = new Map();
   }
@@ -163,6 +164,95 @@ export class ParseTaskWorker {
       let recovered = 0;
       for (const task of tasks) {
         if (task.state !== 'running' && task.state !== 'result-store') continue;
+        
+        // P0 Patch 2: check if MinerU is still processing before resetting
+        const mineruTaskId = task.metadata?.mineruTaskId;
+        const localEndpointRaw = task.optionsSnapshot?.localEndpoint;
+
+        if (mineruTaskId && localEndpointRaw && task.engine === 'local-mineru') {
+          let localEndpoint = localEndpointRaw;
+          if (localEndpoint.includes('localhost') || localEndpoint.includes('127.0.0.1')) {
+            localEndpoint = localEndpoint.replace(/localhost|127\.0\.0\.1/g, 'host.docker.internal');
+          }
+          localEndpoint = localEndpoint.replace(/\/+$/, '');
+
+          let mineruStatus = null;
+          let fetchError = null;
+
+          try {
+            const tRes = await fetch(`${localEndpoint}/tasks/${mineruTaskId}`, { signal: AbortSignal.timeout(3000) });
+            if (tRes.ok) {
+              const tData = await tRes.json();
+              mineruStatus = String(tData.status || tData.state || tData.task_status || tData.data?.status || tData.data?.state).toLowerCase();
+            } else if (tRes.status === 404) {
+              mineruStatus = 'not_found';
+            } else {
+              fetchError = `HTTP ${tRes.status}`;
+            }
+          } catch (e) {
+            fetchError = e.message;
+          }
+
+          if (mineruStatus) {
+            const isDone = ['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(mineruStatus);
+            const isFailed = ['failed', 'error', 'failure', 'canceled', 'cancelled'].includes(mineruStatus);
+            const isQueued = ['pending', 'queued'].includes(mineruStatus);
+            const isProcessing = ['processing', 'running'].includes(mineruStatus);
+
+            if (isProcessing) {
+               await this.updateTaskWithRetry(task.id, {
+                 state: 'running',
+                 stage: 'mineru-processing',
+                 message: '重启恢复：检测到 MinerU 仍在处理，正在接管',
+                 metadata: { ...task.metadata, mineruStatus: 'processing' }
+               }, { enqueueOnFailure: true });
+               this.resumeMineruTask(task, mineruTaskId).catch(err => console.error(`[task-worker] Error resuming task ${task.id}:`, err));
+            } else if (isQueued) {
+               await this.updateTaskWithRetry(task.id, {
+                 state: 'running',
+                 stage: 'mineru-queued',
+                 message: '重启恢复：检测到 MinerU 仍在排队，正在接管',
+                 metadata: { ...task.metadata, mineruStatus: 'queued' }
+               }, { enqueueOnFailure: true });
+               this.resumeMineruTask(task, mineruTaskId).catch(err => console.error(`[task-worker] Error resuming task ${task.id}:`, err));
+            } else if (isDone) {
+               await this.updateTaskWithRetry(task.id, {
+                 state: 'result-store',
+                 stage: 'store',
+                 message: '重启恢复：检测到 MinerU 已完成，准备拉取结果',
+                 metadata: { ...task.metadata, mineruStatus: 'completed' }
+               }, { enqueueOnFailure: true });
+               this.resumeMineruTask(task, mineruTaskId).catch(err => console.error(`[task-worker] Error resuming task ${task.id}:`, err));
+            } else if (isFailed) {
+               await this.transition(task, {
+                 state: 'failed',
+                 message: '重启恢复：检测到 MinerU 执行失败',
+                 metadata: { ...task.metadata, mineruStatus: 'failed' }
+               }, 'worker-failed', 'error');
+            } else if (mineruStatus === 'not_found') {
+               await this.transition(task, {
+                 state: 'failed',
+                 message: '重启恢复：MinerU 任务已丢失，需人工干预',
+                 metadata: { ...task.metadata, mineruStatus: 'not_found' }
+               }, 'worker-failed', 'error');
+            } else {
+               await this.transition(task, {
+                 state: 'failed',
+                 message: `重启恢复：MinerU 状态异常 (${mineruStatus})，需人工干预`,
+                 metadata: { ...task.metadata, mineruStatus: mineruStatus }
+               }, 'worker-failed', 'error');
+            }
+            continue; 
+          } else if (fetchError) {
+             await this.transition(task, {
+               state: 'failed',
+               message: `重启恢复：查询 MinerU 状态失败 (${fetchError})，转为失败态避免重复提交`,
+               metadata: { ...task.metadata, mineruStatus: 'unknown' }
+             }, 'worker-failed', 'error');
+             continue;
+          }
+        }
+
         const updatedAt = task.updatedAt ? new Date(task.updatedAt).getTime() : 0;
         const timeoutMs = Number(task.optionsSnapshot?.localTimeout || 3600) * 1000;
         // 若任务还在健康窗口内（不更新时间未超时），自愈时不处理；
@@ -433,6 +523,135 @@ export class ParseTaskWorker {
         state: 'failed',
         errorMessage: error.message,
         message: `[${modeLabel}] 执行失败: ${error.message}`
+      }, 'worker-failed', 'error');
+
+      if (task.materialId) {
+        await this.updateMaterialWithRetry(task.materialId, {
+          status: 'failed',
+          mineruStatus: 'failed',
+          aiStatus: 'failed',
+          metadata: {
+            processingStage: '',
+            processingMsg: `解析失败: ${error.message}`,
+            processingUpdatedAt: new Date().toISOString(),
+          }
+        }, { enqueueOnFailure: true });
+      }
+    } finally {
+      processingMap.delete(task.id);
+    }
+  }
+
+  async resumeMineruTask(task, mineruTaskId) {
+    if (processingMap.has(task.id)) return;
+    processingMap.add(task.id);
+    console.log(`[task-worker] Resuming task: ${task.id} (mineruTaskId: ${mineruTaskId})`);
+
+    try {
+      const materialInfo = task.optionsSnapshot?.material || {};
+      
+      const mineruResult = await this.mineruResumer({
+        task,
+        material: materialInfo,
+        mineruTaskId,
+        timeoutMs: Number(task.optionsSnapshot?.localTimeout || 3600) * 1000,
+        minioContext: this.minioContext,
+        updateProgress: async (updateInfo) => {
+          const eventName = updateInfo.stage === 'store' ? 'stage-changed' : 'progress-update';
+          await this.transition(task, updateInfo, eventName);
+          
+          if (task.materialId && (updateInfo.stage || updateInfo.message || updateInfo.metadata)) {
+            await this.updateMaterialWithRetry(task.materialId, {
+              metadata: {
+                ...(materialInfo.metadata || {}),
+                ...(updateInfo.metadata || {}),
+                processingStage: updateInfo.stage || task.stage,
+                processingMsg: updateInfo.message || task.message,
+                processingUpdatedAt: new Date().toISOString()
+              }
+            }, { enqueueOnFailure: true });
+          }
+        }
+      });
+
+      const markdownObjectName = mineruResult.objectName;
+      const parsedPrefix = mineruResult.parsedPrefix || `parsed/${task.materialId}/`;
+      const parsedArtifacts = Array.isArray(mineruResult.parsedArtifacts) ? mineruResult.parsedArtifacts : [];
+      const parsedFilesCount = Number(mineruResult.parsedFilesCount || parsedArtifacts.length || 1);
+      const zipObjectName = mineruResult.zipObjectName || null;
+      const artifactIncomplete = mineruResult.artifactIncomplete === true;
+
+      await logTaskEvent({
+        taskId: task.id,
+        taskType: 'parse',
+        level: 'info',
+        event: 'artifacts-saved',
+        message: `解析产物已保存到 ${parsedPrefix} (count=${parsedFilesCount})`,
+        payload: {
+          parsedPrefix,
+          parsedFilesCount,
+          hasMineruZip: Boolean(zipObjectName),
+        },
+      });
+
+      if (artifactIncomplete) {
+        await logTaskEvent({
+          taskId: task.id,
+          taskType: 'parse',
+          level: 'warn',
+          event: 'artifact-incomplete',
+          message: 'MinerU 仅返回 Markdown，完整解析产物未入库',
+          payload: {
+            parsedPrefix,
+            parsedFilesCount,
+            markdownObjectName,
+            mineruTaskId,
+          },
+        });
+      }
+
+      await this.transition(task, {
+        stage: 'complete',
+        state: 'ai-pending',
+        progress: 100,
+        message: 'MinerU 解析完成，产物已落库，等待 AI 元数据识别',
+        metadata: {
+          ...(task.metadata || {}),
+          markdownObjectName,
+          mineruTaskId,
+          parsedPrefix,
+          parsedFilesCount,
+          parsedArtifacts,
+          zipObjectName: zipObjectName || undefined,
+          artifactIncomplete,
+          parsedAt: new Date().toISOString()
+        },
+        completedAt: new Date().toISOString()
+      }, 'worker-completed');
+
+      await this.updateMaterialWithRetry(task.materialId, {
+        mineruStatus: 'completed',
+        metadata: {
+          ...(materialInfo.metadata || {}),
+          markdownObjectName,
+          parsedPrefix,
+          parsedFilesCount,
+          parsedArtifacts,
+          zipObjectName: zipObjectName || undefined,
+          processingStage: 'ai',
+          processingMsg: '解析完成，等待 AI 元数据识别',
+          processingUpdatedAt: new Date().toISOString()
+        }
+      }, { enqueueOnFailure: true });
+
+      await this.tryCreateAiJob(task, markdownObjectName);
+
+    } catch (error) {
+      console.error(`[task-worker] Task ${task.id} failed during resume: ${error.message}`);
+      await this.transition(task, {
+        state: 'failed',
+        errorMessage: error.message,
+        message: `[resume] 执行失败: ${error.message}`
       }, 'worker-failed', 'error');
 
       if (task.materialId) {

@@ -26,9 +26,7 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
       logObservation: null
     };
 
-    try {
-      result.logObservation = await parseLatestMineruProgress();
-    } catch (e) { /* ignore */ }
+    // logObservation will be populated later if there is an active processing task
 
     // 1. Fetch MinerU health
     try {
@@ -61,6 +59,15 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
         result.luceon.mineruQueuedTasks = tasks.filter(t => t.stage === 'mineru-queued').map(t => t.id);
         result.luceon.mineruProcessingTasks = tasks.filter(t => t.stage === 'mineru-processing').map(t => t.id);
         
+        if (result.luceon.mineruProcessingTasks.length > 0) {
+          const targetTaskId = result.luceon.mineruProcessingTasks[0];
+          const targetTask = tasks.find(t => t.id === targetTaskId);
+          if (targetTask) {
+            const minObservedAt = targetTask.metadata?.mineruStartedAt || targetTask.updatedAt || targetTask.createdAt;
+            result.logObservation = await parseLatestMineruProgress(minObservedAt).catch(() => null);
+          }
+        }
+        
         // Find all known MinerU task IDs
         const knownIds = new Set();
         for (const t of tasks) {
@@ -68,13 +75,11 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
         }
         result.luceon.knownMineruTaskIds = Array.from(knownIds);
       }
-    } catch (e) {
+      } catch (e) {
       // If DB fails, we can't fully diagnose
       result.diagnosis.status = 'error';
       result.diagnosis.message = '无法连接到 db-server 获取 Luceon 任务';
       return res.json(result);
-    }
-
     // 3. Diagnosis Logic
     if (result.mineru.processingTasks === 0) {
       result.diagnosis.status = 'healthy';

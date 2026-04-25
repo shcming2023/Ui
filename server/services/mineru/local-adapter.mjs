@@ -322,6 +322,204 @@ export async function processWithLocalMinerU({ task, material, fileStream, fileN
   };
 }
 
+export async function resumeWithLocalMinerU({ task, material, mineruTaskId, timeoutMs, minioContext, updateProgress }) {
+  const options = task.optionsSnapshot || {};
+  let localEndpoint = options.localEndpoint;
+  if (!localEndpoint) throw new Error('缺少 localEndpoint');
+
+  // docker 内部网络地址重写
+  if (localEndpoint.includes('localhost') || localEndpoint.includes('127.0.0.1')) {
+    localEndpoint = localEndpoint.replace(/localhost|127\.0\.0\.1/g, 'host.docker.internal');
+  }
+  localEndpoint = localEndpoint.replace(/\/+$/, '');
+
+  const responseFormatZip = (options.responseFormatZip ?? options.response_format_zip) == null
+    ? true
+    : isEnabledFlag(options.responseFormatZip ?? options.response_format_zip);
+
+  const isHealthy = await checkHealth(localEndpoint);
+  if (!isHealthy) throw new Error(`本地 MinerU 不可达: ${localEndpoint}`);
+
+  await updateProgress({ message: `恢复排队/处理中的任务: ${mineruTaskId}` });
+  let markdown = '';
+
+  await waitMinerUTask(localEndpoint, mineruTaskId, timeoutMs, async (statusPayload) => {
+    const status = String(statusPayload?.status || '').toLowerCase();
+    const queuedAhead = statusPayload?.queued_ahead ?? statusPayload?.queue_ahead ?? 0;
+    const startedAt = statusPayload?.started_at || null;
+
+    let stage = 'mineru-processing';
+    let msg = 'MinerU 正在解析';
+    let progress = 50;
+    let mineruStatus = 'processing';
+
+    const isDone = ['done', 'success', 'completed', 'succeeded', 'finished', 'complete'].includes(status);
+    if (isDone) return; 
+
+    if (status === 'pending' || status === 'queued' || (!startedAt && status !== 'processing') || queuedAhead > 0) {
+      stage = 'mineru-queued';
+      msg = `MinerU 排队中 (前方 ${queuedAhead} 个任务)`;
+      progress = 20;
+      mineruStatus = 'queued';
+    }
+
+    await updateProgress({
+      stage,
+      state: 'running',
+      progress,
+      message: msg,
+      metadata: {
+        ...(task.metadata || {}),
+        mineruTaskId,
+        mineruStatus,
+        mineruQueuedAhead: queuedAhead,
+        mineruStartedAt: startedAt,
+        mineruLastStatusAt: new Date().toISOString()
+      }
+    });
+  });
+
+  await updateProgress({ progress: 80, message: '解析完成，提取结果...' });
+  const resultRaw = await fetchMinerUResultRaw(localEndpoint, mineruTaskId, timeoutMs);
+  let resultPayload = resultRaw.kind === 'json' ? resultRaw.payload : null;
+
+  const materialId = task.materialId || task.id;
+  const parsedPrefix = `parsed/${materialId}/`;
+  const fullMdObjectName = `${parsedPrefix}full.md`;
+  const parsedArtifacts = [];
+  const seen = new Set();
+
+  const pushArtifact = (relativePath, objectName, size, mimeType) => {
+    const key = `${relativePath}::${objectName}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    parsedArtifacts.push({
+      objectName,
+      relativePath,
+      size: typeof size === 'number' ? size : undefined,
+      mimeType: mimeType || undefined,
+    });
+  };
+
+  const saveObject = async (objectName, buffer, contentType) => {
+    if (typeof minioContext?.saveObject !== 'function') return false;
+    await minioContext.saveObject(objectName, buffer, contentType || 'application/octet-stream');
+    return true;
+  };
+
+  let zipObjectName = null;
+  let hasMineruZip = false;
+
+  if (resultPayload) {
+    const rawJson = Buffer.from(JSON.stringify(resultPayload), 'utf-8');
+    const rawObjectName = `${parsedPrefix}mineru-result.json`;
+    const ok = await saveObject(rawObjectName, rawJson, 'application/json; charset=utf-8');
+    if (ok) pushArtifact('mineru-result.json', rawObjectName, rawJson.length, 'application/json');
+  }
+
+  let zipBuffer = resultRaw.kind === 'zip' ? resultRaw.buffer : null;
+  if (!zipBuffer && resultPayload && responseFormatZip) {
+    zipBuffer = await extractZipBufferFromJsonResult(resultPayload, timeoutMs);
+  }
+
+  if (zipBuffer) {
+    hasMineruZip = true;
+    zipObjectName = `${parsedPrefix}mineru-result.zip`;
+    const ok = await saveObject(zipObjectName, zipBuffer, 'application/zip');
+    if (ok) pushArtifact('mineru-result.zip', zipObjectName, zipBuffer.length, 'application/zip');
+
+    const zip = await JSZip.loadAsync(zipBuffer);
+    const entries = Object.entries(zip.files)
+      .filter(([, entry]) => !entry.dir)
+      .map(([name]) => name);
+
+    const mdCandidates = [];
+    for (const name of entries) {
+      const safeRelativePath = sanitizeRelativePath(name);
+      if (!safeRelativePath) continue;
+      const lower = safeRelativePath.toLowerCase();
+      if (!lower.endsWith('.md')) continue;
+      if (safeRelativePath === 'mineru-result.zip' || safeRelativePath === 'mineru-result.json') continue;
+      mdCandidates.push({ name, relativePath: safeRelativePath });
+    }
+
+    const isFullMd = (rel) => {
+      const lower = String(rel || '').toLowerCase();
+      return lower === 'full.md' || lower.endsWith('/full.md');
+    };
+
+    const pickPrimaryMarkdown = (candidates) => {
+      if (!Array.isArray(candidates) || candidates.length === 0) return null;
+      const full = candidates.find((c) => isFullMd(c.relativePath));
+      if (full) return full;
+      if (candidates.length === 1) return candidates[0];
+
+      const auto = candidates.filter((c) => String(c.relativePath || '').toLowerCase().includes('/auto/'));
+      const pool = auto.length > 0 ? auto : candidates;
+      return pool.slice().sort((a, b) => String(a.relativePath).length - String(b.relativePath).length)[0];
+    };
+
+    const primary = pickPrimaryMarkdown(mdCandidates);
+    if (primary && !markdown) {
+      const content = await zip.file(primary.name).async('nodebuffer');
+      markdown = content.toString('utf-8').trim();
+    }
+
+    for (const name of entries) {
+      const safeRelativePath = sanitizeRelativePath(name);
+      if (!safeRelativePath) continue;
+      if (safeRelativePath === 'full.md') continue;
+      if (safeRelativePath === 'mineru-result.zip' || safeRelativePath === 'mineru-result.json') continue;
+
+      const content = await zip.file(name).async('nodebuffer');
+      const objectName = `${parsedPrefix}${safeRelativePath}`;
+      const contentType = inferContentTypeByExt(safeRelativePath);
+      const ok = await saveObject(objectName, content, contentType);
+      if (ok) pushArtifact(safeRelativePath, objectName, content.length, contentType);
+    }
+  } else if (resultPayload) {
+    markdown = extractLocalMarkdown(resultPayload);
+    const extra = await extractArtifactsFromJsonResult(resultPayload, timeoutMs);
+    for (const item of extra) {
+      const safeRelativePath = sanitizeRelativePath(item.relativePath);
+      if (!safeRelativePath) continue;
+      if (safeRelativePath === 'full.md') continue;
+      const objectName = `${parsedPrefix}${safeRelativePath}`;
+      const contentType = item.mimeType || inferContentTypeByExt(safeRelativePath);
+      const ok = await saveObject(objectName, item.buffer, contentType);
+      if (ok) pushArtifact(safeRelativePath, objectName, item.buffer.length, contentType);
+    }
+  }
+
+  if (!markdown) throw new Error('提取到的 Markdown 内容为空');
+
+  await updateProgress({ stage: 'store', state: 'result-store', progress: 90, message: '正在保存产物到 MinIO...' });
+
+  await minioContext.saveMarkdown(fullMdObjectName, markdown);
+  pushArtifact('full.md', fullMdObjectName, Buffer.byteLength(markdown, 'utf-8'), 'text/markdown');
+
+  const realArtifacts = parsedArtifacts.filter((a) => {
+    const rp = String(a.relativePath || '');
+    if (rp === 'full.md') return false;
+    if (rp === 'mineru-result.json') return false;
+    if (rp === 'mineru-result.zip') return false;
+    return true;
+  });
+
+  const artifactIncomplete = realArtifacts.length === 0;
+
+  return {
+    markdown,
+    mineruTaskId,
+    objectName: fullMdObjectName,
+    parsedPrefix,
+    parsedFilesCount: parsedArtifacts.length,
+    parsedArtifacts,
+    zipObjectName: hasMineruZip ? zipObjectName : null,
+    artifactIncomplete,
+  };
+}
+
 // ─── Utils ───────────────────────────────────
 
 function isEnabledFlag(value) {
