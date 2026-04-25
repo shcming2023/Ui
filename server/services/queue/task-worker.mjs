@@ -542,6 +542,13 @@ export class ParseTaskWorker {
     }
   }
 
+  /**
+   * 接管已在 MinerU 端存在的任务，执行后台轮询与结果拉取。
+   *
+   * @param {Object} task 要接管的 Luceon 任务记录
+   * @param {string} mineruTaskId 对应的 MinerU 内部任务 ID
+   * @returns {Promise<void>} 异步接管流程，不阻塞当前线程
+   */
   async resumeMineruTask(task, mineruTaskId) {
     if (processingMap.has(task.id)) return;
     processingMap.add(task.id);

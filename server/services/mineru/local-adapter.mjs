@@ -322,6 +322,18 @@ export async function processWithLocalMinerU({ task, material, fileStream, fileN
   };
 }
 
+/**
+ * 从给定的 MinerU 任务 ID 无缝恢复任务执行，不再重复上传文件。
+ *
+ * @param {Object} params 参数对象
+ * @param {Object} params.task 当前执行的 Luceon 任务对象
+ * @param {Object} params.material 当前任务关联的资料对象
+ * @param {string} params.mineruTaskId 要恢复的 MinerU 内部任务 ID
+ * @param {number} params.timeoutMs 轮询与等待超时时间（毫秒）
+ * @param {Object} params.minioContext MinIO 上下文客户端，用于产物存储
+ * @param {Function} params.updateProgress 进度与状态回调函数
+ * @returns {Promise<Object>} 包含 markdown 文本和解析产物元数据的对象
+ */
 export async function resumeWithLocalMinerU({ task, material, mineruTaskId, timeoutMs, minioContext, updateProgress }) {
   const options = task.optionsSnapshot || {};
   let localEndpoint = options.localEndpoint;
