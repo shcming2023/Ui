@@ -287,6 +287,9 @@ export class ParseTaskWorker {
 
       // P0: 纠偏错误 failed 的任务（有 mineruTaskId 但 Luceon 误判 failed）
       await this.recoverMisjudgedFailedTasks(tasks);
+
+      // P1 Patch 7.1: 补偿清理已恢复/已完成任务上残留的旧 errorMessage
+      await this.cleanupStaleErrorMessages(tasks);
     } catch (err) {
       console.error(`[task-worker] runRecoveryScan error: ${err.message}`);
     }
@@ -494,6 +497,72 @@ export class ParseTaskWorker {
           }, { enqueueOnFailure: true });
         }
       }
+    }
+  }
+
+  /**
+   * P1 Patch 7.1: 补偿清理已恢复/已完成任务上残留的旧 errorMessage。
+   *
+   * 触发条件（必须同时满足）：
+   * - state 为 completed / review-pending / ai-pending / running 之一
+   * - metadata.recoveredFromMisjudgedFailed === true
+   * - errorMessage 非空（即存在残留旧错误）
+   *
+   * 执行动作：
+   * - 将旧 errorMessage 转存到 metadata.previousErrorMessage（若已存在则不覆盖）
+   * - 清空 errorMessage
+   * - 不改变 state / stage / progress / parsedFilesCount 等任何业务字段
+   *
+   * 安全保护：
+   * - state=failed 的任务绝不清理——真实失败必须保留证据
+   * - 不清理不含 recoveredFromMisjudgedFailed 标记的任务——避免误清 AI 阶段错误
+   *
+   * @param {Array} tasks - 当前所有任务列表
+   * @returns {Promise<void>}
+   */
+  async cleanupStaleErrorMessages(tasks) {
+    const recoveredStates = ['completed', 'review-pending', 'ai-pending', 'running'];
+    const candidates = tasks.filter(t =>
+      recoveredStates.includes(t.state) &&
+      t.metadata?.recoveredFromMisjudgedFailed === true &&
+      t.errorMessage && t.errorMessage.trim() !== ''
+    );
+
+    if (candidates.length === 0) return;
+
+    let cleaned = 0;
+    for (const task of candidates) {
+      const oldErrorMessage = task.errorMessage;
+      const existingPrevious = task.metadata?.previousErrorMessage;
+
+      // 如果 previousErrorMessage 已存在且非空，不覆盖为更弱的信息
+      const previousErrorMessage = (existingPrevious && existingPrevious.trim() !== '')
+        ? existingPrevious
+        : oldErrorMessage;
+
+      await this.updateTaskWithRetry(task.id, {
+        errorMessage: '',
+        metadata: {
+          ...(task.metadata || {}),
+          previousErrorMessage,
+          errorMessageCleanedAt: new Date().toISOString()
+        }
+      }, { enqueueOnFailure: true });
+
+      console.log(`[task-worker] cleanupStaleErrorMessages: Task ${task.id} (state=${task.state}) 旧 errorMessage 已清理`);
+      await logTaskEvent({
+        taskId: task.id,
+        taskType: 'parse',
+        level: 'info',
+        event: 'stale-error-cleaned',
+        message: `已恢复任务残留 errorMessage 已清理: "${oldErrorMessage.substring(0, 80)}"`,
+        payload: { previousErrorMessage, cleanedState: task.state }
+      });
+      cleaned++;
+    }
+
+    if (cleaned > 0) {
+      console.log(`[task-worker] cleanupStaleErrorMessages: 共清理 ${cleaned} 个已恢复任务的旧 errorMessage`);
     }
   }
 

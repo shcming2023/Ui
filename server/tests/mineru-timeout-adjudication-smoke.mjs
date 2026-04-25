@@ -3,6 +3,7 @@
  * 
  * P0 MinerU 长耗时状态裁决与错误 failed 纠偏的冒烟测试。
  * P1 Material 状态同步与旧 errorMessage 清理验证。
+ * P1.1 历史已恢复/已完成任务 stale errorMessage 补偿清理验证。
  * 
  * 测试场景：
  * 1. MinerU processing 超过本地 timeout → Luceon 不进入 failed
@@ -11,6 +12,8 @@
  * 4. failed + mineruTaskId + MinerU processing → 纠偏回 running + Material 同步
  * 5. failed + MinerU completed + resume 完成 → Material.status/mineruStatus/aiStatus 完全恢复
  * 6. AI Job 创建失败但 parsed 已入库 → Material.mineruStatus 不回滚
+ * 7. completed/ai-pending + recoveredFromMisjudgedFailed + stale errorMessage → 补偿清理
+ * 8. failed + MinerU failed → errorMessage 不得被清理
  */
 
 import { ParseTaskWorker } from '../services/queue/task-worker.mjs';
@@ -459,13 +462,197 @@ async function runTest() {
     console.log('Test 6 Pass ✅\n');
   }
 
+  // ─── Test 7: completed + recoveredFromMisjudgedFailed + stale errorMessage → 补偿清理 ───
+  console.log('Test 7: completed + recoveredFromMisjudgedFailed + stale errorMessage → 补偿清理');
+  {
+    const taskUpdates = [];
+    const materialUpdates = [];
+
+    const mockTaskClient = {
+      getAllTasks: async () => [],
+      updateTask: async (_id, update) => { taskUpdates.push(update); return true; },
+      updateMaterial: async (_id, update) => { materialUpdates.push(update); return true; },
+    };
+
+    const worker = new ParseTaskWorker({
+      minioContext: { getFileStream: async () => ({}), saveMarkdown: async () => {}, saveObject: async () => {} },
+      taskClient: mockTaskClient,
+    });
+
+    const tasks = [
+      // 场景 A: completed 任务仍残留旧 errorMessage
+      {
+        id: 'test-cleanup-completed-7a',
+        engine: 'local-mineru',
+        state: 'completed',
+        stage: 'done',
+        materialId: 'mat-7a',
+        message: 'AI 识别完成: confirmed',
+        errorMessage: 'The operation was aborted due to timeout',
+        parsedFilesCount: 96,
+        metadata: {
+          mineruTaskId: 'mineru-7a',
+          recoveredFromMisjudgedFailed: true,
+          recoveredAt: '2026-04-25T01:30:00Z',
+          parsedFilesCount: 96,
+        },
+      },
+      // 场景 B: ai-pending 任务残留旧 errorMessage（previousErrorMessage 已存在）
+      {
+        id: 'test-cleanup-ai-pending-7b',
+        engine: 'local-mineru',
+        state: 'ai-pending',
+        stage: 'complete',
+        materialId: 'mat-7b',
+        message: 'MinerU 解析完成',
+        errorMessage: '超时未完成 (等待超过 3600s)',
+        parsedFilesCount: 50,
+        metadata: {
+          mineruTaskId: 'mineru-7b',
+          recoveredFromMisjudgedFailed: true,
+          previousErrorMessage: 'original error before first recovery',
+          recoveredAt: '2026-04-25T01:00:00Z',
+          parsedFilesCount: 50,
+        },
+      },
+      // 场景 C: failed 任务 — 不得被清理
+      {
+        id: 'test-no-cleanup-failed-7c',
+        engine: 'local-mineru',
+        state: 'failed',
+        stage: 'mineru-processing',
+        materialId: 'mat-7c',
+        message: 'MinerU API 明确返回 failed',
+        errorMessage: 'MinerU API 明确返回 failed: corrupted file',
+        metadata: {
+          mineruTaskId: 'mineru-7c',
+          failureEvidenceSource: 'MinerU API',
+          // 无 recoveredFromMisjudgedFailed — 真实失败
+        },
+      },
+      // 场景 D: running 任务，但无 recoveredFromMisjudgedFailed — 不得被清理（避免误清 AI 错误）
+      {
+        id: 'test-no-cleanup-running-7d',
+        engine: 'local-mineru',
+        state: 'running',
+        stage: 'ai-processing',
+        materialId: 'mat-7d',
+        message: 'AI 处理中',
+        errorMessage: 'AI provider timeout',
+        metadata: {
+          mineruTaskId: 'mineru-7d',
+          // 无 recoveredFromMisjudgedFailed
+        },
+      },
+    ];
+
+    await worker.cleanupStaleErrorMessages(tasks);
+
+    // 场景 A 断言：completed 任务的 errorMessage 应被清理
+    const cleanedA = taskUpdates.find(u => u.metadata?.errorMessageCleanedAt && u.metadata?.previousErrorMessage === 'The operation was aborted due to timeout');
+    assert(cleanedA !== undefined, '7A: completed task stale errorMessage should be cleaned');
+    assert(cleanedA?.errorMessage === '', '7A: errorMessage should be empty after cleanup');
+    assert(cleanedA?.metadata?.previousErrorMessage === 'The operation was aborted due to timeout', '7A: previousErrorMessage should preserve the old error');
+    // 不得改变 state/stage/parsedFilesCount
+    assert(cleanedA?.state === undefined, '7A: state should NOT be changed during cleanup');
+    assert(cleanedA?.stage === undefined, '7A: stage should NOT be changed during cleanup');
+
+    // 场景 B 断言：ai-pending 任务清理，但 previousErrorMessage 不被覆盖
+    const cleanedB = taskUpdates.find(u => u.metadata?.previousErrorMessage === 'original error before first recovery');
+    assert(cleanedB !== undefined, '7B: ai-pending task stale errorMessage should be cleaned');
+    assert(cleanedB?.errorMessage === '', '7B: errorMessage should be empty after cleanup');
+    assert(cleanedB?.metadata?.previousErrorMessage === 'original error before first recovery', '7B: existing previousErrorMessage should NOT be overwritten');
+
+    // 场景 C 断言：failed 任务不被清理（state=failed 不匹配 recoveredStates）
+    const cleanedC = taskUpdates.some(u => u.metadata?.previousErrorMessage === 'MinerU API 明确返回 failed: corrupted file');
+    assert(!cleanedC, '7C: failed task errorMessage should NOT be cleaned');
+
+    // 场景 D 断言：running 无 recoveredFromMisjudgedFailed 不被清理
+    const cleanedD = taskUpdates.some(u => u.metadata?.previousErrorMessage === 'AI provider timeout');
+    assert(!cleanedD, '7D: running task without recoveredFromMisjudgedFailed should NOT be cleaned');
+
+    // 总数断言：只有 2 个任务被清理（A 和 B）
+    assert(taskUpdates.length === 2, `Exactly 2 tasks should be cleaned (got ${taskUpdates.length})`);
+
+    console.log('Test 7 Pass ✅\n');
+  }
+
+  // ─── Test 8: MinerU failed 场景 errorMessage 不得被任何路径清除 ───
+  console.log('Test 8: failed + MinerU failed → errorMessage 保留完整失败证据');
+  {
+    const taskUpdates = [];
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('/tasks/mineru-confirmed-failed-8')) {
+        return { ok: true, status: 200, json: async () => ({ status: 'failed', error: 'Internal OCR engine crash' }) };
+      }
+      return originalFetch(url);
+    };
+
+    const mockTaskClient = {
+      getAllTasks: async () => [],
+      updateTask: async (_id, update) => { taskUpdates.push(update); return true; },
+      updateMaterial: async (_id, update) => true,
+    };
+
+    const worker = new ParseTaskWorker({
+      minioContext: { getFileStream: async () => ({}), saveMarkdown: async () => {}, saveObject: async () => {} },
+      taskClient: mockTaskClient,
+    });
+
+    const failedTask = {
+      id: 'test-failed-evidence-8',
+      engine: 'local-mineru',
+      state: 'failed',
+      stage: 'mineru-processing',
+      materialId: 'mat-8',
+      message: '超时未完成',
+      errorMessage: 'The operation was aborted due to timeout',
+      optionsSnapshot: {
+        localEndpoint: 'http://localhost:8083',
+        localTimeout: 3600,
+        material: { fileName: 'broken.pdf', mimeType: 'application/pdf', metadata: { objectName: 'originals/mat-8/source.pdf' } }
+      },
+      metadata: { mineruTaskId: 'mineru-confirmed-failed-8' },
+    };
+
+    // Step 1: recoverMisjudgedFailedTasks 确认 MinerU 也 failed
+    await worker.recoverMisjudgedFailedTasks([failedTask]);
+
+    // 断言：任务仍为 failed
+    const failUpdate = taskUpdates.find(u => u.state === 'failed');
+    assert(failUpdate !== undefined, '8: Task should remain failed');
+    assert(failUpdate?.message?.includes('MinerU API 明确返回'), '8: message should have MinerU evidence');
+    // errorMessage 未被清空（recoverMisjudgedFailedTasks 的 isFailed 分支不设 errorMessage）
+    assert(failUpdate?.errorMessage === undefined, '8: errorMessage should NOT be set/cleared by confirmed-failed path');
+
+    // Step 2: cleanupStaleErrorMessages 也不应触及 failed 任务
+    const cleanupUpdates = [];
+    const worker2 = new ParseTaskWorker({
+      minioContext: { getFileStream: async () => ({}), saveMarkdown: async () => {}, saveObject: async () => {} },
+      taskClient: {
+        getAllTasks: async () => [],
+        updateTask: async (_id, update) => { cleanupUpdates.push(update); return true; },
+        updateMaterial: async (_id, update) => true,
+      },
+    });
+
+    await worker2.cleanupStaleErrorMessages([failedTask]);
+    assert(cleanupUpdates.length === 0, '8: cleanupStaleErrorMessages should NOT touch failed tasks');
+
+    globalThis.fetch = originalFetch;
+    console.log('Test 8 Pass ✅\n');
+  }
+
   // ─── Summary ───
   console.log(`\n=== Results: ${testsPassed} passed, ${testsFailed} failed ===`);
   if (testsFailed > 0) {
     console.error('❌ Some tests failed!');
     process.exit(1);
   } else {
-    console.log('✅ All P0/P1 MinerU Timeout Adjudication & Material Sync tests passed!');
+    console.log('✅ All P0/P1 MinerU Timeout Adjudication, Material Sync & Error Cleanup tests passed!');
     process.exit(0);
   }
 }
