@@ -72,7 +72,7 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
         const knownIdsMap = new Map();
         for (const t of tasks) {
           if (t.metadata?.mineruTaskId) {
-            knownIdsMap.set(t.metadata.mineruTaskId, { id: t.id, state: t.state });
+            knownIdsMap.set(t.metadata.mineruTaskId, t);
           }
         }
         result.luceon.knownMineruTaskIds = Array.from(knownIdsMap.keys());
@@ -95,6 +95,7 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
     // processingTasks > 0
     let actualProcessingMineruTaskId = null;
     let actualProcessingLuceonTaskInfo = null;
+    let actualMineruTaskStartedAt = null;
     let foundLuceonTaskProcessing = result.luceon.mineruProcessingTasks.length > 0;
 
     // Deep check known MinerU tasks if MinerU says it's processing
@@ -107,6 +108,7 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
             if (tData.status === 'processing' || tData.status === 'running' || (tData.started_at && !['done', 'success', 'completed', 'succeeded', 'failed'].includes(tData.status))) {
               actualProcessingMineruTaskId = mTaskId;
               actualProcessingLuceonTaskInfo = result.luceon.knownMineruTaskMap[mTaskId];
+              actualMineruTaskStartedAt = tData.started_at;
               break;
             }
           }
@@ -127,6 +129,9 @@ export function registerMineruDiagnosticsRoutes(app, getDbBaseUrl) {
         result.diagnosis.blockingMineruTaskId = actualProcessingMineruTaskId;
         result.diagnosis.blockingLuceonTaskId = actualProcessingLuceonTaskInfo.id;
         result.diagnosis.safeToAutoRecover = false;
+        
+        const minObservedAt = actualMineruTaskStartedAt || actualProcessingLuceonTaskInfo.metadata?.mineruStartedAt || actualProcessingLuceonTaskInfo.updatedAt || actualProcessingLuceonTaskInfo.createdAt;
+        result.logObservation = await parseLatestMineruProgress(minObservedAt).catch(() => null);
       } else {
         result.diagnosis.status = 'busy';
         result.diagnosis.kind = 'luceon-processing';

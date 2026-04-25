@@ -305,6 +305,12 @@ export function OpsHealthPage() {
                   </div>
                   {diagnostics.logObservation ? (
                     <div>
+                      {diagnostics.diagnosis.kind === 'known-failed-but-mineru-processing' && (
+                        <div className="bg-red-50 text-red-600 px-3 py-2 rounded-lg text-xs font-bold mb-3 border border-red-100 flex gap-2 items-start">
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                          该进度来自仍在运行的 MinerU 内部任务，但 Luceon 侧任务已 failed。
+                        </div>
+                      )}
                       <p className="text-xs text-slate-500 mb-2">最近真实进度</p>
                       <div className="bg-white rounded-xl p-3 border border-slate-200">
                         <p className="text-sm font-bold text-slate-800">

@@ -1,4 +1,6 @@
 import { registerMineruDiagnosticsRoutes } from '../lib/ops-mineru-diagnostics.mjs';
+import fs from 'fs';
+import path from 'path';
 
 // Mock Express app
 const routes = {};
@@ -88,18 +90,27 @@ async function runTest() {
 
   // Test 4: Known failed but MinerU processing
   console.log('Test 4: Known failed but MinerU processing');
+  
+  const scratchPath = path.join(process.cwd(), 'uat', 'scratch');
+  if (!fs.existsSync(scratchPath)) fs.mkdirSync(scratchPath, { recursive: true });
+  const mockLog = path.join(scratchPath, 'mineru-api.log');
+  fs.writeFileSync(mockLog, 'Predict: 52%|█████▏    | 14/27 [02:04<01:52,  8.66s/it]\n');
+
   mockMineruHealth = { processing_tasks: 1, queued_tasks: 0 };
+  const pastTime = new Date(Date.now() - 10000).toISOString();
   mockLuceonTasks = [
-    { id: 't1', state: 'failed', stage: 'mineru-failed', metadata: { mineruTaskId: 'failed-p1' } }
+    { id: 't1', state: 'failed', stage: 'mineru-failed', metadata: { mineruTaskId: 'failed-p1' }, createdAt: pastTime }
   ];
   mockMineruTasks = {
-    'failed-p1': { status: 'processing', started_at: 'yes' }
+    'failed-p1': { status: 'processing', started_at: pastTime }
   };
 
   resData = await new Promise(resolve => handler({}, makeRes(resolve)));
   console.assert(resData.diagnosis.kind === 'known-failed-but-mineru-processing', 'Expected known-failed-but-mineru-processing');
   console.assert(resData.diagnosis.status === 'blocked', 'Expected blocked');
   console.assert(resData.diagnosis.safeToAutoRecover === false, 'Expected safeToAutoRecover false');
+  console.assert(resData.logObservation !== null, 'Expected logObservation 非空');
+  console.assert(resData.logObservation.phase === 'Predict', 'Expected logObservation phase to be Predict');
   console.log('Test 4 Pass ✅');
 
   console.log('✅ Diagnostics语义验证通过！');
