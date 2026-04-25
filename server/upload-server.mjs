@@ -2213,8 +2213,9 @@ app.post('/tasks', upload.single('file'), async (req, res) => {
     };
 
     const mineruExecutionProfile = {
-      backend: optionsSnapshot.backend,
-      effectiveBackend: optionsSnapshot.backend,
+      backendRequested: optionsSnapshot.backend,
+      backendEffective: null,
+      backendEffectiveReason: 'resolved-by-local-adapter',
       parseMethod: optionsSnapshot.parseMethod || 'auto',
       enableOcr: optionsSnapshot.enableOcr !== false && optionsSnapshot.enableOcr !== 'false',
       enableFormula: optionsSnapshot.enableFormula !== false && optionsSnapshot.enableFormula !== 'false',

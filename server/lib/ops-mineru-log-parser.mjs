@@ -314,8 +314,7 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
       if (stats.mtimeMs > latestMtime) {
         latestMtime = stats.mtimeMs;
 
-        let backendProfile = executionProfile?.backend || 'pipeline';
-        if (executionProfile?.effectiveBackend) backendProfile = executionProfile.effectiveBackend;
+        let backendProfile = executionProfile?.backendEffective || executionProfile?.backendRequested || executionProfile?.backend || 'pipeline';
 
         let document = {
           totalPages: null,
@@ -323,8 +322,18 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
         };
         if (latestWindow && latestWindow.pageTotal) {
           document.totalPages = latestWindow.pageTotal;
-        } else if (executionProfile?.maxPages) {
-          document.totalPages = executionProfile.maxPages;
+        } else {
+          // Look for page_count in document-shape signals
+          for (let i = businessSignals.length - 1; i >= 0; i--) {
+            const sig = businessSignals[i];
+            if (sig.type === 'document-shape' && sig.raw) {
+              const m = sig.raw.match(/page_count\s*=\s*(\d+)/i);
+              if (m) {
+                document.totalPages = parseInt(m[1], 10);
+                break;
+              }
+            }
+          }
         }
 
         let unitType = 'unknown-units';
@@ -348,9 +357,11 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
           }
         } else {
           // pipeline
-          if (normalizedPhase === 'Processing pages' || normalizedPhase === 'Layout') {
+          if (document.totalPages && latestProgress?.total === document.totalPages) {
               unitType = 'document-pages';
-          } else if (normalizedPhase.includes('Table-ocr') || normalizedPhase === 'Table') {
+          } else if (normalizedPhase === 'Processing pages' || normalizedPhase === 'Layout' || normalizedPhase.includes('Predict Layout')) {
+              unitType = 'document-pages';
+          } else if (normalizedPhase.includes('Table-ocr') || normalizedPhase === 'Table' || normalizedPhase.includes('Predict Table-ocr')) {
               unitType = 'table-regions';
           } else if (normalizedPhase.includes('OCR') || normalizedPhase === 'OCR-rec') {
               unitType = 'ocr-recognition-blocks';

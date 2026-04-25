@@ -386,6 +386,38 @@ export function TaskManagementPage() {
                                  // api-alive-only 不得显示为正在推进
                                  if (level === 'api-alive-only') return 'MinerU API 可达 · 未见业务进展';
                                  if (level === 'no-business-signal') return 'MinerU 正在解析 · 暂无信号';
+
+                                 // Structural rendering
+                                 if (obs.backendProfile) {
+                                   const bp = obs.backendProfile.toLowerCase().includes('hybrid') ? 'Hybrid' : 'Pipeline';
+                                   const parts = [bp];
+                                   if (obs.stage && obs.stage.rawPhase) {
+                                      let st = obs.stage.rawPhase;
+                                      if (obs.stage.current != null && obs.stage.total != null) st += ` ${obs.stage.current}/${obs.stage.total}`;
+                                      parts.push(st);
+                                   } else if (obs.phase) {
+                                      let st = obs.phase;
+                                      if (obs.current != null && obs.total != null) st += ` ${obs.current}/${obs.total}`;
+                                      parts.push(st);
+                                   }
+                                   
+                                   const unitType = obs.stage?.unitType || '';
+                                   if (unitType === 'model-units') parts.push('模型单元');
+                                   else if (unitType === 'ocr-recognition-blocks') parts.push('OCR识别块');
+                                   else if (unitType === 'table-regions') parts.push('表格识别');
+                                   
+                                   const win = obs.window || obs.latestWindow;
+                                   if (win && win.total) {
+                                      parts.push(`窗口 ${win.index || win.windowCurrent}/${win.total || win.windowTotal}`);
+                                      if (win.pageStart && win.pageEnd) {
+                                        parts.push(`页 ${win.pageStart}-${win.pageEnd}/${win.pageTotal || '?'}`);
+                                      }
+                                   } else if (obs.document && obs.document.totalPages) {
+                                      parts.push(`文档 ${obs.document.totalPages}页`);
+                                   }
+                                   return parts.join(' · ');
+                                 }
+
                                  const parts: string[] = ['正在解析'];
                                  if (obs.phase && obs.current != null && obs.total != null) {
                                    parts.push(`${obs.phase} ${obs.current}/${obs.total}`);

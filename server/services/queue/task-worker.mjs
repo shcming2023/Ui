@@ -958,8 +958,8 @@ export class ParseTaskWorker {
             parsedFilesCount,
             parsedArtifacts,
             zipObjectName: zipObjectName || undefined,
-            processingStage: 'ai',
-            processingMsg: '解析完成，等待 AI 元数据识别',
+            processingStage: 'mineru-completed',
+            processingMsg: 'MinerU 解析完成，等待 AI 元数据识别',
             processingUpdatedAt: new Date().toISOString()
           }
         }, { enqueueOnFailure: true });

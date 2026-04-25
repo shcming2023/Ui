@@ -595,6 +595,73 @@ async function run() {
     console.log('Test 20 Pass ✅\n');
   }
 
+  // ─── Test 21: A-Sample (pipeline + auto + table=true) ───
+  console.log('Test 21: A-Sample (pipeline + auto + table=true)');
+  {
+    const lines = [
+      '2026-04-20 10:00:00 | INFO | document-shape: page_count=27',
+      '2026-04-20 10:00:01 | INFO | Predict Layout:  37%|███       | 10/27',
+      '2026-04-20 10:00:02 | INFO | Predict Table-ocr:  33%|███       | 5/15',
+      '2026-04-20 10:00:03 | INFO | Predict OCR:  74%|███████   | 20/27',
+    ];
+    const scratchPath = path.join(process.cwd(), 'uat', 'scratch');
+    fs.mkdirSync(scratchPath, { recursive: true });
+    const mockLog = path.join(scratchPath, 'mineru-api.log');
+    fs.writeFileSync(mockLog, lines.join('\n'));
+    process.env.MINERU_LOG_PATH = mockLog;
+
+    const { parseLatestMineruProgress } = await import('../lib/ops-mineru-log-parser.mjs');
+    const latestObservation = await parseLatestMineruProgress(null, null, { backendRequested: 'pipeline', enableTable: true, parseMethod: 'auto' });
+    assert(latestObservation.backendProfile === 'pipeline', 'Backend should be pipeline');
+    assert(latestObservation.stage?.rawPhase === 'Predict OCR', 'Last phase should be Predict OCR');
+    assert(latestObservation.stage?.unitType === 'document-pages', 'OCR total=27 should be inferred as document-pages');
+    assert(latestObservation.document?.totalPages === 27, 'Total pages should be extracted from document-shape');
+    console.log('Test 21 Pass ✅\n');
+  }
+
+  // ─── Test 22: B-Sample (pipeline + ocr + table=false) ───
+  console.log('Test 22: B-Sample (pipeline + ocr + table=false)');
+  {
+    const lines = [
+      '2026-04-20 10:00:00 | INFO | document-shape: page_count=12',
+      '2026-04-20 10:00:01 | INFO | Predict Layout:  41%|████      | 5/12',
+      '2026-04-20 10:00:03 | INFO | Predict OCR:  83%|████████  | 10/12',
+    ];
+    const mockLog = path.join(process.cwd(), 'uat', 'scratch', 'mineru-api.log');
+    fs.writeFileSync(mockLog, lines.join('\n'));
+    process.env.MINERU_LOG_PATH = mockLog;
+
+    const { parseLatestMineruProgress } = await import('../lib/ops-mineru-log-parser.mjs');
+    const latestObservation = await parseLatestMineruProgress(null, null, { backendRequested: 'pipeline', enableTable: false, parseMethod: 'ocr' });
+    assert(latestObservation.backendProfile === 'pipeline', 'Backend should be pipeline');
+    assert(latestObservation.stage?.rawPhase === 'Predict OCR', 'Last phase should be Predict OCR');
+    assert(latestObservation.stage?.unitType === 'document-pages', 'OCR total=12 should be inferred as document-pages');
+    console.log('Test 22 Pass ✅\n');
+  }
+
+  // ─── Test 23: C-Sample (hybrid-auto-engine + auto) ───
+  console.log('Test 23: C-Sample (hybrid-auto-engine + auto)');
+  {
+    const lines = [
+      '2026-04-20 10:00:00 | INFO | document-shape: total_windows=3 window_size=10',
+      '2026-04-20 10:00:01 | INFO | Hybrid processing window 1/3: pages 1-10/27',
+      '2026-04-20 10:00:02 | INFO | Predict Layout:  20%|██        | 2/10',
+      '2026-04-20 10:00:03 | INFO | Predict OCR:   1%|          | 5/355',
+    ];
+    const mockLog = path.join(process.cwd(), 'uat', 'scratch', 'mineru-api.log');
+    fs.writeFileSync(mockLog, lines.join('\n'));
+    process.env.MINERU_LOG_PATH = mockLog;
+
+    const { parseLatestMineruProgress } = await import('../lib/ops-mineru-log-parser.mjs');
+    const latestObservation = await parseLatestMineruProgress(null, null, { backendRequested: 'hybrid-auto-engine' });
+    assert(latestObservation.backendProfile === 'hybrid-auto-engine', 'Backend should be hybrid-auto-engine');
+    assert(latestObservation.stage?.rawPhase === 'Predict OCR', 'Last phase should be Predict OCR');
+    assert(latestObservation.stage?.unitType === 'model-units', 'OCR 355 is neither pages nor window, so unknown units (model-units fallback)');
+    assert(latestObservation.window?.pageStart === 1, 'Window start should be 1');
+    assert(latestObservation.window?.pageEnd === 10, 'Window end should be 10');
+    console.log('Test 23 Pass ✅\n');
+  }
+
   // ── 环境恢复 ──
   if (origLogPath !== undefined) process.env.MINERU_LOG_PATH = origLogPath;
   else delete process.env.MINERU_LOG_PATH;

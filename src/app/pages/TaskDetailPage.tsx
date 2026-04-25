@@ -756,132 +756,212 @@ export function TaskDetailPage() {
                   </div>
                 </dl>
                 
-                {/* MinerU 真实进度观测 */}
-                {task.metadata?.mineruObservedProgress && (
+                {/* MinerU 执行画像 */}
+                {task.metadata?.mineruExecutionProfile && (
                   <div className="mt-4 pt-4 border-t border-slate-100">
                     <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3 flex items-center gap-2">
-                      MinerU 真实进度观测
+                      执行画像
                     </h3>
-                    <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 space-y-2">
-                      {/* 当前阶段 */}
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-slate-500">当前阶段</span>
-                        <span className="text-sm font-medium text-slate-800">
-                          {String((task.metadata.mineruObservedProgress as any).phase || '—')}
-                        </span>
+                    <dl className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-3 text-sm">
+                      <div className="flex justify-between">
+                        <dt className="text-slate-400">backend / parseMethod</dt>
+                        <dd className="text-slate-800 font-mono text-xs truncate max-w-[200px]" title={task.metadata.mineruExecutionProfile.backendRequested || '—'}>{task.metadata.mineruExecutionProfile.backendRequested || '—'} / {task.metadata.mineruExecutionProfile.parseMethod || '—'}</dd>
                       </div>
-                      {/* 阶段进度 */}
-                      {(task.metadata.mineruObservedProgress as any).current != null && (
-                        <div className="flex justify-between items-center">
-                          <span className="text-xs text-slate-500">阶段进度</span>
-                          <span className="text-sm font-medium text-slate-800">
-                            {String((task.metadata.mineruObservedProgress as any).current)}/{String((task.metadata.mineruObservedProgress as any).total ?? '?')}
-                            {(task.metadata.mineruObservedProgress as any).percent != null && ` （${String((task.metadata.mineruObservedProgress as any).percent)}%）`}
-                          </span>
-                        </div>
-                      )}
-                      {/* 百分比进度条 */}
-                      {(task.metadata.mineruObservedProgress as any).percent != null && (
-                        <div className="flex items-center gap-2">
-                          <div className="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden">
-                            <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${(task.metadata.mineruObservedProgress as any).percent}%` }} />
-                          </div>
-                          <span className="text-xs font-mono text-slate-500 w-8 text-right">{(task.metadata.mineruObservedProgress as any).percent}%</span>
-                        </div>
-                      )}
-                      {/* Hybrid 窗口 */}
-                      {(task.metadata.mineruObservedProgress as any).latestWindow && (() => {
-                        const w = (task.metadata.mineruObservedProgress as any).latestWindow;
-                        return (
-                          <div className="flex justify-between items-center">
-                            <span className="text-xs text-slate-500">窗口 / 页码</span>
-                            <span className="text-sm font-medium text-slate-800">
-                              窗口 {w.windowCurrent ?? '—'}/{w.windowTotal ?? '—'} · 页 {w.pageStart ?? '—'}-{w.pageEnd ?? '—'}/{w.pageTotal ?? '—'}
-                            </span>
-                          </div>
-                        );
-                      })()}
-                      {/* 最近业务信号时间 */}
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-slate-500">最近进度更新</span>
-                        <span className="text-xs text-slate-600">
-                          {(() => {
-                            const raw = (task.metadata.mineruObservedProgress as any).lastProgressObservedAt || (task.metadata.mineruObservedProgress as any).observedAt;
-                            if (!raw) return '—';
-                            const dt = new Date(raw).getTime();
-                            if (isNaN(dt)) return '—';
-                            const diff = Math.round((Date.now() - dt) / 1000);
-                            if (diff < 0) return '刚刚';
-                            if (diff < 60) return `${diff} 秒前`;
-                            return `${Math.floor(diff / 60)} 分钟前`;
-                          })()}
-                        </span>
+                      <div className="flex justify-between">
+                        <dt className="text-slate-400">effectiveBackend</dt>
+                        <dd className="text-slate-800 font-mono text-xs">{task.metadata.mineruExecutionProfile.backendEffective || '等待判定'}</dd>
                       </div>
-                      {/* 日志文件更新时间 */}
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-slate-500">日志文件更新</span>
-                        <span className="text-xs text-slate-600">
-                          {(task.metadata.mineruObservedProgress as any).logFileUpdatedAt
-                            ? new Date(String((task.metadata.mineruObservedProgress as any).logFileUpdatedAt)).toLocaleString()
-                            : '—'}
-                        </span>
+                      <div className="flex justify-between">
+                        <dt className="text-slate-400">enableOcr / enableFormula</dt>
+                        <dd className="text-slate-800 font-mono text-xs">{String(task.metadata.mineruExecutionProfile.enableOcr)} / {String(task.metadata.mineruExecutionProfile.enableFormula)}</dd>
                       </div>
-                      {/* 活性等级 — v1.1 全覆盖 */}
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs text-slate-500">活性状态</span>
-                        <span className={`text-xs font-bold px-2 py-0.5 rounded ${(() => {
-                          const h = String(task.metadata.mineruProgressHealth || (task.metadata.mineruObservedProgress as any).activityLevel || '');
-                          switch (h) {
-                            case 'active-progress': return 'bg-green-100 text-green-700';
-                            case 'active-stage-change': return 'bg-green-100 text-green-700';
-                            case 'active-business-log': return 'bg-blue-100 text-blue-700';
-                            case 'api-alive-only': return 'bg-yellow-100 text-yellow-700';
-                            case 'no-business-signal': return 'bg-slate-200 text-slate-600';
-                            case 'suspected-stale': return 'bg-orange-100 text-orange-700';
-                            case 'stale-critical': return 'bg-red-100 text-red-700';
-                            case 'failed-confirmed': return 'bg-red-100 text-red-700';
-                            case 'log-observation-stale': return 'bg-amber-100 text-amber-700';
-                            default: return 'bg-slate-200 text-slate-600';
-                          }
-                        })()}`}>
-                          {(() => {
-                            const h = String(task.metadata.mineruProgressHealth || (task.metadata.mineruObservedProgress as any).activityLevel || '');
-                            const labels: Record<string, string> = {
-                              'active-progress': '进度推进中',
-                              'active-stage-change': '阶段切换中',
-                              'active-business-log': '业务日志活跃',
-                              'api-alive-only': '仅 API 可达',
-                              'no-business-signal': '暂无业务信号',
-                              'suspected-stale': '疑似停滞',
-                              'stale-critical': '严重停滞',
-                              'failed-confirmed': '日志确认失败',
-                              'log-observation-stale': '日志观测滞后',
-                            };
-                            return labels[h] || h || '—';
-                          })()}
-                        </span>
+                      <div className="flex justify-between">
+                        <dt className="text-slate-400">enableTable / ocrLanguage</dt>
+                        <dd className="text-slate-800 font-mono text-xs">{String(task.metadata.mineruExecutionProfile.enableTable)} / {task.metadata.mineruExecutionProfile.ocrLanguage || '—'}</dd>
                       </div>
-                      {/* 日志观测滞后警告 */}
-                      {((task.metadata.mineruObservedProgress as any).observationStale ||
-                        String(task.metadata.mineruProgressHealth) === 'log-observation-stale') && (
-                        <div className="mt-2 p-2.5 bg-amber-50 border border-amber-200 rounded-md">
-                          <p className="text-xs font-medium text-amber-800">
-                            ⚠ MinerU 仍在处理，但日志观测通道滞后，当前进度可能不是最新。
-                          </p>
-                          {(task.metadata.mineruObservedProgress as any).phase && (
-                            <p className="text-xs text-amber-700 mt-1">
-                              最后可见进度：{(task.metadata.mineruObservedProgress as any).phase} {(task.metadata.mineruObservedProgress as any).current ?? '?'}/{(task.metadata.mineruObservedProgress as any).total ?? '?'}
-                              {(task.metadata.mineruObservedProgress as any).latestWindow && (() => {
-                                const w = (task.metadata.mineruObservedProgress as any).latestWindow;
-                                return ` · 窗口 ${w.windowCurrent ?? '—'}/${w.windowTotal ?? '—'} · 页 ${w.pageStart ?? '—'}-${w.pageEnd ?? '—'}/${w.pageTotal ?? '—'}`;
-                              })()}
-                            </p>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                      <div className="flex justify-between">
+                        <dt className="text-slate-400">maxPages</dt>
+                        <dd className="text-slate-800 font-mono text-xs">{task.metadata.mineruExecutionProfile.maxPages || '—'} (限制参数)</dd>
+                      </div>
+                      <div className="flex justify-between">
+                        <dt className="text-slate-400">fileSize</dt>
+                        <dd className="text-slate-800 font-mono text-xs">{task.metadata.mineruExecutionProfile.fileSize ? `${(task.metadata.mineruExecutionProfile.fileSize / 1024 / 1024).toFixed(2)} MB` : '—'}</dd>
+                      </div>
+                    </dl>
                   </div>
                 )}
+                
+                {/* MinerU 当前日志语义 */}
+                {task.metadata?.mineruObservedProgress && (() => {
+                  const obs = task.metadata.mineruObservedProgress as any;
+                  return (
+                    <div className="mt-4 pt-4 border-t border-slate-100">
+                      <h3 className="text-xs font-bold text-slate-700 uppercase tracking-wider mb-3 flex items-center gap-2">
+                        当前日志语义
+                      </h3>
+                      <div className="bg-slate-50 rounded-lg p-3 border border-slate-100 space-y-2">
+                        {obs.backendProfile && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs text-slate-500">backendProfile</span>
+                            <span className="text-sm font-medium text-slate-800">
+                              {obs.backendProfile}
+                            </span>
+                          </div>
+                        )}
+                        {/* 当前阶段 & 进度 */}
+                        {obs.stage ? (
+                          <>
+                            <div className="flex justify-between items-center">
+                              <span className="text-xs text-slate-500">当前阶段</span>
+                              <span className="text-sm font-medium text-slate-800">
+                                {obs.stage.rawPhase || '—'}
+                                {obs.stage.unitType === 'model-units' && ' (模型单元)'}
+                                {obs.stage.unitType === 'ocr-recognition-blocks' && ' (OCR识别块)'}
+                                {obs.stage.unitType === 'table-regions' && ' (表格识别)'}
+                              </span>
+                            </div>
+                            {(obs.stage.current != null) && (
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-slate-500">阶段进度</span>
+                                <span className="text-sm font-medium text-slate-800">
+                                  {obs.stage.current}/{obs.stage.total ?? '?'}
+                                  {obs.stage.percent != null && ` （${obs.stage.percent}%）`}
+                                </span>
+                              </div>
+                            )}
+                            {/* 百分比进度条 */}
+                            {obs.stage.percent != null && (
+                              <div className="flex items-center gap-2">
+                                <div className="flex-1 h-1.5 bg-slate-200 rounded-full overflow-hidden">
+                                  <div className="h-full bg-blue-500 rounded-full transition-all duration-500" style={{ width: `${obs.stage.percent}%` }} />
+                                </div>
+                                <span className="text-xs font-mono text-slate-500 w-8 text-right">{obs.stage.percent}%</span>
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {/* 旧格式兼容 */}
+                            <div className="flex justify-between items-center">
+                              <span className="text-xs text-slate-500">当前阶段</span>
+                              <span className="text-sm font-medium text-slate-800">
+                                {obs.phase || '暂无结构化日志信号'}
+                              </span>
+                            </div>
+                            {obs.current != null && (
+                              <div className="flex justify-between items-center">
+                                <span className="text-xs text-slate-500">阶段进度</span>
+                                <span className="text-sm font-medium text-slate-800">
+                                  {obs.current}/{obs.total ?? '?'}
+                                  {obs.percent != null && ` （${obs.percent}%）`}
+                                </span>
+                              </div>
+                            )}
+                          </>
+                        )}
+                        
+                        {/* Hybrid 窗口 */}
+                        {(obs.window || obs.latestWindow) && (() => {
+                          const w = obs.window || obs.latestWindow;
+                          return (
+                            <div className="flex justify-between items-center">
+                              <span className="text-xs text-slate-500">窗口 / 页码</span>
+                              <span className="text-sm font-medium text-slate-800">
+                                窗口 {w.index ?? w.windowCurrent ?? '—'}/{w.total ?? w.windowTotal ?? '—'} · 页 {w.pageStart ?? '—'}-{w.pageEnd ?? '—'}/{w.pageTotal ?? '—'}
+                              </span>
+                            </div>
+                          );
+                        })()}
+                        
+                        {/* 文档页数 */}
+                        {obs.document && obs.document.totalPages != null && (
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs text-slate-500">文档页数</span>
+                            <span className="text-sm font-medium text-slate-800">
+                              共 {obs.document.totalPages} 页
+                            </span>
+                          </div>
+                        )}
+
+                        {/* 最近业务信号时间 */}
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs text-slate-500">最近进度更新</span>
+                          <span className="text-xs text-slate-600">
+                            {(() => {
+                              const raw = obs.lastProgressObservedAt || obs.observedAt;
+                              if (!raw) return '—';
+                              const dt = new Date(raw).getTime();
+                              if (isNaN(dt)) return '—';
+                              const diff = Math.round((Date.now() - dt) / 1000);
+                              if (diff < 0) return '刚刚';
+                              if (diff < 60) return `${diff} 秒前`;
+                              return `${Math.floor(diff / 60)} 分钟前`;
+                            })()}
+                          </span>
+                        </div>
+                        {/* 日志文件更新时间 */}
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs text-slate-500">日志文件更新</span>
+                          <span className="text-xs text-slate-600">
+                            {obs.logFileUpdatedAt
+                              ? new Date(String(obs.logFileUpdatedAt)).toLocaleString()
+                              : '—'}
+                          </span>
+                        </div>
+                        {/* 活性等级 — v1.1 全覆盖 */}
+                        <div className="flex justify-between items-center">
+                          <span className="text-xs text-slate-500">活性状态</span>
+                          <span className={`text-xs font-bold px-2 py-0.5 rounded ${(() => {
+                            const h = String(task.metadata?.mineruProgressHealth || obs.activityLevel || '');
+                            switch (h) {
+                              case 'active-progress': return 'bg-green-100 text-green-700';
+                              case 'active-stage-change': return 'bg-green-100 text-green-700';
+                              case 'active-business-log': return 'bg-blue-100 text-blue-700';
+                              case 'api-alive-only': return 'bg-yellow-100 text-yellow-700';
+                              case 'no-business-signal': return 'bg-slate-200 text-slate-600';
+                              case 'suspected-stale': return 'bg-orange-100 text-orange-700';
+                              case 'stale-critical': return 'bg-red-100 text-red-700';
+                              case 'failed-confirmed': return 'bg-red-100 text-red-700';
+                              case 'log-observation-stale': return 'bg-amber-100 text-amber-700';
+                              default: return 'bg-slate-200 text-slate-600';
+                            }
+                          })()}`}>
+                            {(() => {
+                              const h = String(task.metadata?.mineruProgressHealth || obs.activityLevel || '');
+                              const labels: Record<string, string> = {
+                                'active-progress': '进度推进中',
+                                'active-stage-change': '阶段切换中',
+                                'active-business-log': '业务日志活跃',
+                                'api-alive-only': '仅 API 可达',
+                                'no-business-signal': '暂无业务信号',
+                                'suspected-stale': '疑似停滞',
+                                'stale-critical': '严重停滞',
+                                'failed-confirmed': '日志确认失败',
+                                'log-observation-stale': '日志观测滞后',
+                              };
+                              return labels[h] || h || '暂无结构化日志信号';
+                            })()}
+                          </span>
+                        </div>
+                        {/* 日志观测滞后警告 */}
+                        {(obs.observationStale ||
+                          String(task.metadata?.mineruProgressHealth) === 'log-observation-stale') && (
+                          <div className="mt-2 p-2.5 bg-amber-50 border border-amber-200 rounded-md">
+                            <p className="text-xs font-medium text-amber-800">
+                              ⚠ MinerU 仍在处理，但日志观测通道滞后，当前进度可能不是最新。
+                            </p>
+                            {(obs.stage?.rawPhase || obs.phase) && (
+                              <p className="text-xs text-amber-700 mt-1">
+                                最后可见进度：{obs.stage?.rawPhase || obs.phase} {obs.stage?.current ?? obs.current ?? '?'}/{obs.stage?.total ?? obs.total ?? '?'}
+                                {obs.window && ` · 窗口 ${obs.window.index ?? '—'}/${obs.window.total ?? '—'} · 页 ${obs.window.pageStart ?? '—'}-${obs.window.pageEnd ?? '—'}/${obs.window.pageTotal ?? '—'}`}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
             )}
 
