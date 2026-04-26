@@ -1082,7 +1082,7 @@ async function callGradioToMarkdown(localEndpoint, fileInput, fileName, mimeType
     Boolean(params?.enableFormula),
     Boolean(params?.enableTable),
     language,
-    String(params?.backend || 'hybrid-auto-engine'),
+    String(params?.backend || 'pipeline'),
     dockerRewriteEndpoint(String(params?.serverUrl || '')),
   ];
 

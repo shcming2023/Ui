@@ -140,7 +140,7 @@ export const initialMinerUConfig: MinerUConfig = {
   engine: 'local',
   localEndpoint: '',
   localTimeout: 3600,
-  localBackend: 'hybrid-auto-engine',
+  localBackend: 'pipeline',
   localMaxPages: 1000,
   localOcrLanguage: 'ch',
   apiMode: 'precise',

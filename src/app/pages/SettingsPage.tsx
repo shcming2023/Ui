@@ -1225,12 +1225,12 @@ export function SettingsPage() {
                 </FieldRow>
                 <FieldRow label="解析引擎选择">
                   <Select
-                    value={mineruForm.localBackend || 'hybrid-auto-engine'}
+                    value={mineruForm.localBackend || 'pipeline'}
                     onChange={(v) => updateMineru({ localBackend: v })}
                     options={[
-                      { value: 'hybrid-auto-engine', label: 'hybrid-auto-engine（推荐）' },
+                      { value: 'pipeline', label: 'pipeline（默认/稳定）' },
+                      { value: 'hybrid-auto-engine', label: 'hybrid-auto-engine（视觉增强/大文件慎用）' },
                       { value: 'vlm-auto-engine', label: 'vlm-auto-engine（高精度/耗时）' },
-                      { value: 'pipeline', label: 'pipeline（更快）' },
                     ]}
                   />
                 </FieldRow>
