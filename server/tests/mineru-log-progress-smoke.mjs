@@ -834,6 +834,115 @@ async function run() {
     console.log('Test 26 Pass ✅\n');
   }
 
+  // ─── Test 27: hybrid model-units 长尾持续归因 ───
+  console.log('Test 27: hybrid model-units 长尾持续归因 (Test A)');
+  {
+    const mockLog = path.join(scratchPath, 'mineru-api.log');
+    const mockErrLog = path.join(scratchPath, 'mineru-api.err.log');
+    
+    // 构造只有长尾部分（无时间戳）的当前日志
+    const lines = [
+      'Predict:  95%|█████████▌| 336/355 [09:10<00:23,  1.21s/it]',
+      'Predict:  99%|█████████▊| 350/355 [09:45<00:11,  2.32s/it]'
+    ];
+    fs.writeFileSync(mockLog, lines.join('\n'));
+    fs.writeFileSync(mockErrLog, ''); // 清理旧数据
+    process.env.MINERU_LOG_PATH = mockLog;
+    process.env.MINERU_ERR_LOG_PATH = mockErrLog;
+
+    const minObservedAt = '2020-01-01T16:00:00.000Z';
+    const previousObservation = {
+      contextTime: '2020-01-01T16:00:01.000Z',
+      phase: 'Predict',
+      current: 177,
+      percent: 50,
+      window: {
+        index: 1,
+        total: 1,
+        pageStart: 1,
+        pageEnd: 24,
+        pageTotal: 24
+      },
+      document: {
+        totalPages: 24
+      }
+    };
+    const executionProfile = { backendEffective: 'hybrid-auto-engine' };
+
+    const result = await parseLatestMineruProgress(minObservedAt, previousObservation, executionProfile);
+    assert(result !== null, 'Should return result');
+    assert(result.activityLevel !== 'log-observation-no-business-signal' && result.activityLevel !== 'log-observation-unattributed', `Should have valid activityLevel, got: ${result.activityLevel}`);
+    assert(result.phase === 'Predict', `Expected Predict, got ${result.phase}`);
+    assert(result.current === 350, `Expected 350, got ${result.current}`);
+    assert(result.total === 355, `Expected 355, got ${result.total}`);
+    assert(result.stage?.unitType === 'model-units', `Expected model-units, got ${result.stage?.unitType}`);
+    assert(result.window !== null, 'Window should be inherited');
+    assert(result.window.pageStart === 1, `Expected window.pageStart=1, got ${result.window.pageStart}`);
+    assert(result.window.pageEnd === 24, `Expected window.pageEnd=24, got ${result.window.pageEnd}`);
+    assert(result.window.pageTotal === 24, `Expected window.pageTotal=24, got ${result.window.pageTotal}`);
+    
+    console.log('Test 27 Pass ✅\n');
+  }
+
+  // ─── Test 28: 裸 tqdm 无上下文仍不可归因 ───
+  console.log('Test 28: 裸 tqdm 无上下文仍不可归因 (Test B)');
+  {
+    const mockLog = path.join(scratchPath, 'mineru-api.log');
+    const mockErrLog = path.join(scratchPath, 'mineru-api.err.log');
+    
+    const lines = [
+      'Predict:  99%|█████████▊| 350/355 [09:45<00:11,  2.32s/it]'
+    ];
+    fs.writeFileSync(mockLog, lines.join('\n'));
+    fs.writeFileSync(mockErrLog, '');
+    process.env.MINERU_LOG_PATH = mockLog;
+    process.env.MINERU_ERR_LOG_PATH = mockErrLog;
+
+    const minObservedAt = '2020-01-01T16:00:00.000Z';
+    // 无 previousObservation
+    const result = await parseLatestMineruProgress(minObservedAt, null, null);
+    
+    if (result) {
+      assert(result.activityLevel === 'log-observation-unattributed' || result.activityLevel === 'log-observation-no-business-signal' || !result.signals?.hasBusinessSignal, `Should not be attributed properly, got activityLevel=${result.activityLevel}`);
+    }
+    console.log('Test 28 Pass ✅\n');
+  }
+
+  // ─── Test 29: 新任务 minObservedAt 晚于旧上下文时不可串任务 ───
+  console.log('Test 29: 新任务 minObservedAt 晚于旧上下文时不可串任务 (Test C)');
+  {
+    const mockLog = path.join(scratchPath, 'mineru-api.log');
+    const mockErrLog = path.join(scratchPath, 'mineru-api.err.log');
+    
+    // 旧日志，时间较早
+    const lines = [
+      '2020-01-01 15:00:00 | INFO ... start',
+      'Predict:  99%|█████████▊| 350/355 [09:45<00:11,  2.32s/it]'
+    ];
+    fs.writeFileSync(mockLog, lines.join('\n'));
+    fs.writeFileSync(mockErrLog, '');
+    process.env.MINERU_LOG_PATH = mockLog;
+    process.env.MINERU_ERR_LOG_PATH = mockErrLog;
+
+    // 新任务启动时间晚于旧日志上下文
+    const minObservedAt = '2020-01-01T16:00:00.000Z';
+    // previousObservation 如果有，也是旧任务的（按理不该传，即使传了也不继承）
+    const previousObservation = {
+      contextTime: '2020-01-01 15:00:00',
+      phase: 'Predict'
+    };
+
+    const result = await parseLatestMineruProgress(minObservedAt, previousObservation, null);
+    
+    if (result) {
+      assert(result.activityLevel === 'log-observation-unattributed' || result.activityLevel === 'log-observation-no-business-signal' || !result.signals?.hasBusinessSignal, `Should not be attributed to new task, got activityLevel=${result.activityLevel}`);
+      if (result.phase) {
+        assert(false, `Should not have phase, got ${result.phase}`);
+      }
+    }
+    console.log('Test 29 Pass ✅\n');
+  }
+
 
   // ── 环境恢复 ──
   if (origLogPath !== undefined) process.env.MINERU_LOG_PATH = origLogPath;

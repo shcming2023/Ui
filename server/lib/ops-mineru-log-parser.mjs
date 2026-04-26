@@ -288,12 +288,30 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
       let previousPhase = previousObservation?.phase || null;
       const businessSignals = [];
 
+      const minObservedMs = minObservedAt ? new Date(minObservedAt).getTime() : 0;
+
+      // ── 上下文继承：解决长尾裸 tqdm 丢失上下文问题 ──
+      if (previousObservation) {
+        if (minObservedMs === 0 || (previousObservation.contextTime && new Date(previousObservation.contextTime).getTime() >= minObservedMs)) {
+          lastContextTime = previousObservation.contextTime || null;
+          
+          if (previousObservation.window) {
+            latestWindow = {
+              windowCurrent: previousObservation.window.index,
+              windowTotal: previousObservation.window.total,
+              pageStart: previousObservation.window.pageStart,
+              pageEnd: previousObservation.window.pageEnd,
+              pageTotal: previousObservation.window.pageTotal
+            };
+          }
+        }
+      }
+
       // ── 任务段切片：按 minObservedAt 丢弃旧任务日志行 ──
       // 核心逻辑：
       // 1. 带时间戳的行 → 更新 lastContextTime；若早于 minObservedAt → 跳过
       // 2. 无时间戳的 tqdm 行 → 继承 lastContextTime；若 lastContextTime 早于 minObservedAt 或无上下文 → 跳过
       // 3. mtime 只用于日志源可达性/新鲜度判定，不用于业务信号归因
-      const minObservedMs = minObservedAt ? new Date(minObservedAt).getTime() : 0;
 
       for (const line of lines) {
         const classified = classifyLogLine(line);
@@ -385,6 +403,10 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
         totalPages: null,
         currentPages: null
       };
+      if (previousObservation?.document) {
+        document.totalPages = previousObservation.document.totalPages;
+        document.currentPages = previousObservation.document.currentPages;
+      }
       if (latestWindow && latestWindow.pageTotal) {
         document.totalPages = latestWindow.pageTotal;
       } else {
