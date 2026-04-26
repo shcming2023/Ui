@@ -508,7 +508,7 @@ async function run() {
     let updateCalls = 0;
     worker.updateTaskWithRetry = async () => { updateCalls++; return true; };
 
-    const prevKey = 'state=running|stage=mineru-processing|message=MinerU processing|logStatus=missing|activity=|phase=|window=|page=';
+    const prevKey = 'state=running|stage=mineru-processing|message=MinerU processing|logStatus=missing|activity=|phase=|window=|page=|unitType=';
     const task = { id: 't17', state: 'running', metadata: { progressEventKey: prevKey } };
     // 只变 metadata.mineruLastStatusAt，message/stage 不变
     const update = { message: 'MinerU processing', stage: 'mineru-processing', metadata: { mineruLastStatusAt: new Date().toISOString() } };
@@ -664,6 +664,49 @@ async function run() {
     assert(latestObservation.window?.pageStart === 1, 'Window start should be 1');
     assert(latestObservation.window?.pageEnd === 10, 'Window end should be 10');
     console.log('Test 23 Pass ✅\n');
+  }
+
+  // ─── Test 24: Stdout API Noise vs Stderr Business Log (Patch 16.2.4) ───
+  console.log('Test 24: Stdout API Noise vs Stderr Business Log');
+  {
+    const errLines = [
+      '2026-04-20 10:00:00 | INFO | document-shape: page_count=24',
+      '2026-04-20 10:00:05 | INFO | Predict Layout:  50%|█████     | 12/24'
+    ];
+    const outLines = [
+      '2026-04-20 10:00:10 | INFO | GET /health',
+      '2026-04-20 10:00:15 | INFO | GET /health'
+    ];
+    
+    const mockErrLog = path.join(process.cwd(), 'uat', 'scratch', 'mineru-api.err.log');
+    const mockOutLog = path.join(process.cwd(), 'uat', 'scratch', 'mineru-api.log');
+    
+    fs.writeFileSync(mockErrLog, errLines.join('\n'));
+    fs.writeFileSync(mockOutLog, outLines.join('\n'));
+    
+    // Make stdout log newer than stderr log
+    const errMtime = new Date('2026-04-20T10:00:05Z').getTime();
+    const outMtime = new Date('2026-04-20T10:00:15Z').getTime();
+    
+    fs.utimesSync(mockErrLog, new Date(errMtime), new Date(errMtime));
+    fs.utimesSync(mockOutLog, new Date(outMtime), new Date(outMtime));
+    
+    process.env.MINERU_ERR_LOG_PATH = mockErrLog;
+    process.env.MINERU_LOG_PATH = mockOutLog;
+
+    const { parseLatestMineruProgress } = await import('../lib/ops-mineru-log-parser.mjs');
+    
+    // Test with minObservedAt earlier than both
+    const minObservedAt = '2026-04-20T09:59:00Z';
+    const latestObservation = await parseLatestMineruProgress(minObservedAt, null, { backendRequested: 'pipeline' });
+    
+    assert(latestObservation.activityLevel !== 'log-observation-unattributed', 'Should not be unattributed when valid business logs exist');
+    assert(latestObservation.activityLevel !== 'api-alive-only', 'API noise should not override business signals');
+    assert(latestObservation.stage?.rawPhase === 'Predict Layout', 'Must pick business signal from stderr despite older mtime');
+    assert(latestObservation.stage?.current === 12, 'Must extract current from stderr');
+    assert(latestObservation.signals.hasBusinessSignal === true, 'Must have business signal');
+    
+    console.log('Test 24 Pass ✅\n');
   }
 
   // ── 环境恢复 ──

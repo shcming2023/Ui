@@ -1332,6 +1332,7 @@ export class ParseTaskWorker {
       const phase = obs.phase || '';
       const windowIdx = obs.window?.index || '';
       const pageStart = obs.window?.pageStart || '';
+      const unitType = obs.stage?.unitType || '';
 
       const semanticKey = [
         `state=${update.state || task.state || ''}`,
@@ -1341,7 +1342,8 @@ export class ParseTaskWorker {
         `activity=${activityLevel}`,
         `phase=${phase}`,
         `window=${windowIdx}`,
-        `page=${pageStart}`
+        `page=${pageStart}`,
+        `unitType=${unitType}`
       ].join('|');
       const prevKey = task.metadata?.progressEventKey || '';
       if (semanticKey === prevKey) {

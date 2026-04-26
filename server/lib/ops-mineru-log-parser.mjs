@@ -232,7 +232,7 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
   ];
 
   let bestResult = null;
-  let latestMtime = 0;
+  let candidates = [];
   let selectedLogSource = null;
   let fallbackLogSource = null;
   const observerCheckedAt = new Date().toISOString();
@@ -345,122 +345,153 @@ export async function parseLatestMineruProgress(minObservedAt, previousObservati
         activityLevel = 'log-observation-no-business-signal';
       }
 
-      if (stats.mtimeMs >= latestMtime) {
-        latestMtime = stats.mtimeMs;
-        selectedLogSource = { ...logSource, logSourceSelectedReason: 'latest-mtime' };
+      if (activityLevel === 'no-business-signal') {
+        activityLevel = 'log-observation-no-business-signal';
+      }
 
-        let backendProfile = executionProfile?.backendEffective || executionProfile?.backendRequested || executionProfile?.backend || 'pipeline';
+      let backendProfile = executionProfile?.backendEffective || executionProfile?.backendRequested || executionProfile?.backend || 'pipeline';
 
-        let document = {
-          totalPages: null,
-          currentPages: null
-        };
-        if (latestWindow && latestWindow.pageTotal) {
-          document.totalPages = latestWindow.pageTotal;
-        } else {
-          // Look for page_count in document-shape signals
-          for (let i = businessSignals.length - 1; i >= 0; i--) {
-            const sig = businessSignals[i];
-            if (sig.type === 'document-shape' && sig.raw) {
-              const m = sig.raw.match(/page_count\s*=\s*(\d+)/i);
-              if (m) {
-                document.totalPages = parseInt(m[1], 10);
-                break;
-              }
+      let document = {
+        totalPages: null,
+        currentPages: null
+      };
+      if (latestWindow && latestWindow.pageTotal) {
+        document.totalPages = latestWindow.pageTotal;
+      } else {
+        for (let i = businessSignals.length - 1; i >= 0; i--) {
+          const sig = businessSignals[i];
+          if (sig.type === 'document-shape' && sig.raw) {
+            const m = sig.raw.match(/page_count\s*=\s*(\d+)/i);
+            if (m) {
+              document.totalPages = parseInt(m[1], 10);
+              break;
             }
           }
         }
-
-        let unitType = 'unknown-units';
-        let normalizedPhase = latestProgress?.phase || '';
-
-        if (backendProfile.includes('hybrid')) {
-          if (normalizedPhase.toLowerCase().includes('predict')) {
-             if (latestWindow && latestProgress?.total === latestWindow.windowTotal) {
-                 unitType = 'window-pages';
-             } else if (latestWindow && latestProgress?.total === (latestWindow.pageEnd - latestWindow.pageStart + 1)) {
-                 unitType = 'document-pages';
-             } else if (document.totalPages && latestProgress?.total === document.totalPages) {
-                 unitType = 'document-pages';
-             } else if (latestProgress?.total > 100 && (!document.totalPages || latestProgress?.total > document.totalPages)) {
-                 unitType = 'model-units';
-             } else {
-                 unitType = 'model-units';
-             }
-          } else if (normalizedPhase === 'OCR-rec' || normalizedPhase.includes('OCR')) {
-             unitType = 'ocr-recognition-blocks';
-          }
-        } else {
-          // pipeline
-          if (normalizedPhase === 'Processing pages' || normalizedPhase === 'Layout' || normalizedPhase.includes('Predict Layout') || normalizedPhase.includes('Layout Predict')) {
-              unitType = 'document-pages';
-          } else if (normalizedPhase.includes('Table')) {
-              unitType = 'table-regions';
-          } else if (normalizedPhase.includes('OCR')) {
-              unitType = 'ocr-recognition-blocks';
-          } else if (normalizedPhase === 'Seal') {
-              unitType = 'seal-units';
-          } else if (document.totalPages && latestProgress?.total === document.totalPages) {
-              unitType = 'document-pages';
-          }
-        }
-
-        let stage = null;
-        if (latestProgress) {
-            stage = {
-               rawPhase: latestProgress.phase,
-               normalizedPhase: normalizedPhase,
-               unitType: unitType,
-               current: latestProgress.current,
-               total: latestProgress.total,
-               percent: latestProgress.percent
-            };
-        }
-
-        let signals = {
-            hasBusinessSignal: businessLogCount > 0 || progressCount > 0 || stageChangeCount > 0,
-            hasApiNoiseOnly: apiNoiseCount > 0 && progressCount === 0 && businessLogCount === 0 && errorCount === 0,
-            hasErrorSignal: errorCount > 0
-        };
-
-        let windowObj = null;
-        if (latestWindow) {
-           windowObj = {
-               index: latestWindow.windowCurrent,
-               total: latestWindow.windowTotal,
-               pageStart: latestWindow.pageStart,
-               pageEnd: latestWindow.pageEnd,
-               pageTotal: latestWindow.pageTotal
-           };
-        }
-
-        bestResult = {
-          source: 'mineru-log',
-          // tqdm 兼容字段
-          phase: latestProgress?.phase || null,
-          percent: latestProgress?.percent ?? null,
-          current: latestProgress?.current ?? null,
-          total: latestProgress?.total ?? null,
-          rawLine: latestProgress?.rawLine || null,
-          // 结构化新字段
-          activityLevel,
-          signalSummary,
-          latestWindow,
-          latestError,
-          businessSignals: businessSignals.slice(-5), // 保留最后 5 条业务信号
-          logFileUpdatedAt: new Date(stats.mtimeMs).toISOString(),
-          contextTime: latestProgress?.contextTime || (lastBusinessSignalTime ? new Date(lastBusinessSignalTime).toISOString() : null),
-          // Semantic Fields
-          backendProfile,
-          document,
-          window: windowObj,
-          stage,
-          signals
-        };
       }
+
+      let unitType = 'unknown-units';
+      let normalizedPhase = latestProgress?.phase || '';
+
+      if (backendProfile.includes('hybrid')) {
+        if (normalizedPhase.toLowerCase().includes('predict')) {
+           if (latestWindow && latestProgress?.total === latestWindow.windowTotal) {
+               unitType = 'window-pages';
+           } else if (latestWindow && latestProgress?.total === (latestWindow.pageEnd - latestWindow.pageStart + 1)) {
+               unitType = 'document-pages';
+           } else if (document.totalPages && latestProgress?.total === document.totalPages) {
+               unitType = 'document-pages';
+           } else if (latestProgress?.total > 100 && (!document.totalPages || latestProgress?.total > document.totalPages)) {
+               unitType = 'model-units';
+           } else {
+               unitType = 'model-units';
+           }
+        } else if (normalizedPhase === 'OCR-rec' || normalizedPhase.includes('OCR')) {
+           unitType = 'ocr-recognition-blocks';
+        }
+      } else {
+        if (normalizedPhase === 'Processing pages' || normalizedPhase === 'Layout' || normalizedPhase.includes('Predict Layout') || normalizedPhase.includes('Layout Predict')) {
+            unitType = 'document-pages';
+        } else if (normalizedPhase.includes('Table')) {
+            unitType = 'table-regions';
+        } else if (normalizedPhase.includes('OCR')) {
+            unitType = 'ocr-recognition-blocks';
+        } else if (normalizedPhase === 'Seal') {
+            unitType = 'seal-units';
+        } else if (document.totalPages && latestProgress?.total === document.totalPages) {
+            unitType = 'document-pages';
+        }
+      }
+
+      let stage = null;
+      if (latestProgress) {
+          stage = {
+             rawPhase: latestProgress.phase,
+             normalizedPhase: normalizedPhase,
+             unitType: unitType,
+             current: latestProgress.current,
+             total: latestProgress.total,
+             percent: latestProgress.percent
+          };
+      }
+
+      let signals = {
+          hasBusinessSignal: businessLogCount > 0 || progressCount > 0 || stageChangeCount > 0,
+          hasApiNoiseOnly: apiNoiseCount > 0 && progressCount === 0 && businessLogCount === 0 && errorCount === 0,
+          hasErrorSignal: errorCount > 0
+      };
+
+      let windowObj = null;
+      if (latestWindow) {
+         windowObj = {
+             index: latestWindow.windowCurrent,
+             total: latestWindow.windowTotal,
+             pageStart: latestWindow.pageStart,
+             pageEnd: latestWindow.pageEnd,
+             pageTotal: latestWindow.pageTotal
+         };
+      }
+
+      let candidateResult = {
+        source: 'mineru-log',
+        phase: latestProgress?.phase || null,
+        percent: latestProgress?.percent ?? null,
+        current: latestProgress?.current ?? null,
+        total: latestProgress?.total ?? null,
+        rawLine: latestProgress?.rawLine || null,
+        activityLevel,
+        signalSummary,
+        latestWindow,
+        latestError,
+        businessSignals: businessSignals.slice(-5),
+        logFileUpdatedAt: new Date(stats.mtimeMs).toISOString(),
+        contextTime: latestProgress?.contextTime || (lastBusinessSignalTime ? new Date(lastBusinessSignalTime).toISOString() : null),
+        backendProfile,
+        document,
+        window: windowObj,
+        stage,
+        signals
+      };
+
+      candidates.push({ result: candidateResult, logSource });
+
     } catch (_e) {
       // 忽略读取错误
     }
+  }
+
+  if (candidates.length > 0) {
+    let minObservedMs = minObservedAt ? new Date(minObservedAt).getTime() : 0;
+    
+    for (const c of candidates) {
+      const res = c.result;
+      let businessMs = 0;
+      if (res.contextTime) {
+        businessMs = new Date(res.contextTime).getTime();
+      }
+      const mtimeMs = new Date(res.logFileUpdatedAt).getTime();
+      c.businessMs = businessMs;
+      c.mtimeMs = mtimeMs;
+      // 一个日志文件只要有业务信号且 mtime 没有比 minObservedAt 早，就被视为有合法业务信号
+      c.hasValidBusiness = res.signals.hasBusinessSignal && mtimeMs >= minObservedMs;
+    }
+    
+    candidates.sort((a, b) => {
+      // 1. 优先选择有合法业务信号的
+      if (a.hasValidBusiness && !b.hasValidBusiness) return -1;
+      if (!a.hasValidBusiness && b.hasValidBusiness) return 1;
+      
+      // 2. 如果都有或都没有，比较业务信号时间 / mtime
+      if (a.hasValidBusiness) {
+        if (a.businessMs > 0 && b.businessMs > 0) {
+          return b.businessMs - a.businessMs;
+        }
+      }
+      return b.mtimeMs - a.mtimeMs;
+    });
+
+    bestResult = candidates[0].result;
+    selectedLogSource = { ...candidates[0].logSource, logSourceSelectedReason: candidates[0].hasValidBusiness ? 'latest-valid-business-signal' : 'latest-mtime-fallback' };
   }
 
   // 兜底日志不可达状态
